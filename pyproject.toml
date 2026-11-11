@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scoopy-instagram-collections"
+version = "0.1.0"
+description = "Download media from Instagram saved collections"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "selenium>=4.49,<5",
+    "yt-dlp>=2025.10.22",
+    "pymp4v2==0.1.13",
+]
+
+[project.scripts]
+scoopy = "scoopy.ui:main"
+
+[project.optional-dependencies]
+build = ["pyinstaller"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,6 @@
+selenium<5,>=4.49
+yt-dlp>=2025.10.22
+pymp4v2==0.1.13
+
+[build]
+pyinstaller
