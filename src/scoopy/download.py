@@ -32,7 +32,7 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
     an audio track are saved and reported as silent. Failed media is kept in
     a recovery folder and the batch continues.
     """
-    print(f"Reading links from {links_file}...")
+    print(f"📄 Reading links from {links_file}...")
     lines = _read_link_lines(links_file)
     if not lines:
         raise AppError("No links found. Scrape your Instagram collection first.")
@@ -53,7 +53,7 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
     os.makedirs(download_dir, exist_ok=True)
     work_root = os.path.join(download_dir, WORK_DIR_NAME)
 
-    print(f"Found {len(urls)} links to download.")
+    print(f"📥 Found {len(urls)} links to download.")
     summary = {'downloaded': 0, 'silent': 0, 'failed': []}
     counter = iter(range(1, 10 ** 9))
 
@@ -71,7 +71,7 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
-    print(f"Downloaded {summary['downloaded']} videos ({summary['silent']} without audio).")
+    print(f"📥 Downloaded {summary['downloaded']} videos ({summary['silent']} without audio).")
 
     if summary['failed']:
         details = '\n'.join(f"- {item}" for item in summary['failed'])
@@ -81,7 +81,7 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
             "If Instagram requires login, log in again in the app's browser and retry. "
             "Private posts also require access from that account; Instagram may rate-limit downloads.")
 
-    print("Download process finished.")
+    print("✅ Download process finished.")
     return summary
 
 
@@ -279,7 +279,7 @@ def _download_formats(entry, format_id, work_dir, cookies):
     options = _base_options(work_dir)
     options['format'] = format_id
     options['progress_hooks'] = [print_progress, collect]
-    print(f"  Downloading format {format_id}...")
+    print(f"  📥 Downloading format {format_id}...")
     with yt_dlp.YoutubeDL(options) as ydl:
         # No cookiefile/cookiesfrombrowser: yt-dlp will not persist this jar.
         for cookie in cookies:

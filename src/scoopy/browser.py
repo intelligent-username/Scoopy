@@ -34,7 +34,7 @@ def start_driver():
     profile. Selenium Manager resolves the driver and downloads the browser
     if it is not already cached.
     """
-    print("Launching the managed browser for Scoopy (first run needs internet)...")
+    print("🚀 Launching the managed browser for Scoopy (first run needs internet)...")
     options = webdriver.ChromeOptions()
     options.add_argument(f'--user-data-dir={CHROME_PROFILE_DIR}')
     previous = os.environ.get(SE_FORCE_BROWSER_DOWNLOAD)
@@ -57,7 +57,7 @@ def start_driver():
     except Exception:
         driver.quit()
         raise
-    print("Browser opened to Instagram. Please log in.")
+    print("🌐 Browser opened to Instagram. Please log in.")
     return driver
 
 def _post_url_from_href(href):
@@ -125,12 +125,12 @@ def collect_reel_links(driver):
     Returns:
         A list of unique, sorted links.
     """
-    print("Starting link collection. Waiting for the grid to load...")
+    print("🔎 Starting link collection. Waiting for the grid to load...")
     if not _wait_for_first_link(driver):
-        print("No post links appeared on this page. Nothing to collect.")
+        print("⚠️ No post links appeared on this page. Nothing to collect.")
         return []
 
-    print("Grid loaded. Scrolling down.")
+    print("✅ Grid loaded. Scrolling down.")
     seen = set()
     no_new_rounds = 0
     last_count = 0
@@ -144,11 +144,11 @@ def collect_reel_links(driver):
         current_count = len(seen)
         if current_count == last_count:
             no_new_rounds += 1
-            print(f"No new links found on this scroll. (Round {no_new_rounds}/{MAX_NO_NEW_ROUNDS})")
+            print(f"🔗 No new links found on this scroll. (Round {no_new_rounds}/{MAX_NO_NEW_ROUNDS})")
         else:
             no_new_rounds = 0
             last_count = current_count
-            print(f"Collected {current_count} unique links so far...")
+            print(f"🔗 Collected {current_count} unique links so far...")
 
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(SCROLL_PAUSE)
@@ -163,4 +163,4 @@ def save_links(links):
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         for link in links:
             f.write(link + "\n")
-    print(f"Saved {len(links)} links to {LINKS_FILE}")
+    print(f"💾 Saved {len(links)} links to {LINKS_FILE}")
