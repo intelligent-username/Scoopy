@@ -1,4 +1,5 @@
 import os
+import platform
 import queue
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from .browser import start_driver, collect_reel_links, save_links
 from .download import start_download
 from .paths import BASE_DIR, CHROME_PROFILE_DIR, LINKS_FILE
 from .session import AppError, read_browser_cookies
+
+APP_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'app-icon.png')
 
 # --- Constants ---
 APP_TITLE = "Instagram Collections Downloader Pro"
@@ -68,6 +71,7 @@ class DownloaderApp(tk.Tk):
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.configure(bg=COLOR_BG)
         self.resizable(False, False)
+        self._apply_window_icon()
 
         main_frame = ttk.Frame(self, padding=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -148,6 +152,14 @@ class DownloaderApp(tk.Tk):
                              lambda event: setattr(self, "_debug_follow", self._debug_at_bottom()))
         self._debug_line_open = False
         self._debug_count = 0
+
+    def _apply_window_icon(self):
+        """Set the window/taskbar icon; keep a reference to avoid GC."""
+        try:
+            self._app_icon = tk.PhotoImage(file=APP_ICON_PATH)
+            self.iconphoto(True, self._app_icon)
+        except tk.TclError:
+            pass  # Decorative; a missing or invalid icon must not block startup.
 
     def configure_styles(self):
         """Configures all ttk styles for the dark green palette."""
@@ -492,7 +504,20 @@ def close_orphan_profile_chrome():
         print(f"Could not force-close browser processes ({type(error).__name__}).")
 
 
+def _set_windows_taskbar_identity():
+    """Give the process its own Windows AppUserModelID so the taskbar uses
+    the window icon instead of the python.exe icon. No-op elsewhere."""
+    if platform.system() != 'Windows':
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('scoopy.instagram.collections.0.1.0')
+    except OSError:
+        pass
+
+
 def main():
+    _set_windows_taskbar_identity()
     app = DownloaderApp()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
