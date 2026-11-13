@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import shutil
 import tempfile
+import threading
 import time
 from types import MethodType, SimpleNamespace
 import unittest
@@ -358,6 +359,7 @@ class AppTests(unittest.TestCase):
             browser_button=Mock(), scrape_button=Mock(), download_button=Mock(),
             download_hint=Mock(), folder_name_var=Mock(), after=Mock(), write_to_debug=Mock(),
             browser_was_open=False, destroy=Mock(),
+            closing=threading.Event(), driver_lock=threading.Lock(),
         )
         self.app.folder_name_var.get.return_value = 'videos'
         # The links-file gate in update_buttons must not depend on machine state.
@@ -412,16 +414,18 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.app.busy)
         self.assertIn('No active Instagram login', self.messages.showerror.call_args.args[1])
 
-    def test_busy_app_prevents_overlapping_operations_and_close(self):
+    def test_busy_app_prevents_overlapping_operations_but_allows_close(self):
         self.app.busy = True
+        driver = self.app.driver
         target = Mock()
         self.app.start_operation(target, Mock())
         self.app.start_download_thread()
         self.app.start_scraping_thread()
         self.app.on_closing()
         target.assert_not_called()
-        self.app.driver.quit.assert_not_called()
-        self.messages.showwarning.assert_called_once()
+        driver.quit.assert_called_once()
+        self.app.destroy.assert_called_once()
+        self.messages.showwarning.assert_not_called()
 
     def test_close_quits_browser_gracefully_without_forcing(self):
         driver = self.app.driver

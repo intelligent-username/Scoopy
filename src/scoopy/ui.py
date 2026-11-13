@@ -62,6 +62,8 @@ class DownloaderApp(tk.Tk):
         self.debug_queue = queue.Queue()
         self.ui_queue = queue.Queue()
         self.busy = False
+        self.closing = threading.Event()
+        self.driver_lock = threading.Lock()
 
         self.setup_ui()
         self.configure_styles()
@@ -361,11 +363,51 @@ class DownloaderApp(tk.Tk):
         Runs in a thread. Opens the browser and stores the driver instance.
         """
         print("🌐 [thread] Attempting to launch a browser...")
-        self.driver = start_driver()
-        self.browser_was_open = True
+        driver = start_driver()
+        with self.driver_lock:
+            closing = self.closing.is_set()
+            if not closing:
+                self.driver = driver
+                self.browser_was_open = True
+        if closing:
+            shutdown_driver(driver)
+            return
         print("🌐 [thread] Browser is open. Log in to Instagram and navigate to your collection.")
         print("🔑 [thread] Your login cookies will be read automatically when downloading; no export is needed.")
+        threading.Thread(target=self.monitor_login, args=(driver,), daemon=True).start()
         print("✅ [thread] Browser open complete, driver stored.")
+
+    def monitor_login(self, driver):
+        """Report whether a session was present on the first check or appeared later."""
+        logged_in = False
+        first_check = True
+        print("🔎 Checking Instagram login status...")
+        while not self.closing.wait(2):
+            if self.driver is not driver:
+                return
+            if self.busy:
+                continue
+            try:
+                cookies = read_browser_cookies(driver)
+            except AppError:
+                if first_check:
+                    print("🔑 No saved Instagram session detected. Log in in the browser.")
+                logged_in = False
+            except WebDriverException:
+                print("⚠️ Could not check Instagram login: the browser disconnected.")
+                return
+            except Exception as error:
+                print(f"⚠️ Could not check Instagram login ({type(error).__name__}).")
+                return
+            else:
+                cookies.clear()
+                if not logged_in:
+                    if first_check:
+                        print("✅ Existing Instagram session detected. Navigate to your collection and click Scrape Links.")
+                    else:
+                        print("✅ Instagram session detected after waiting for login. Navigate to your collection and click Scrape Links.")
+                    logged_in = True
+            first_check = False
 
     def start_scraping_thread(self):
         if self.busy:
@@ -385,7 +427,9 @@ class DownloaderApp(tk.Tk):
         Runs in a thread. Uses the existing driver to scrape links.
         """
         print("🔎 [thread] Starting scrape_links...")
-        read_browser_cookies(self.driver)
+        cookies = read_browser_cookies(self.driver)
+        cookies.clear()
+        print("✅ Logged into Instagram.")
         print("🔎 [thread] Cookies read, collecting links...")
         links = collect_reel_links(self.driver)
         print(f"🔎 [thread] collect_reel_links returned {len(links)} links")
@@ -459,6 +503,10 @@ class DownloaderApp(tk.Tk):
                     self._overwrite_debug_line(body)
                 continue
             if not body or not body.strip():
+                if newline and self._line_open:
+                    self.debug_area.insert(tk.END, newline)
+                    self._line_open = False
+                    self._debug_count += 1
                 continue
             # Filter: drop noisy third-party chatter.
             if self._is_request_noise(body):
@@ -575,22 +623,19 @@ class DownloaderApp(tk.Tk):
             pass
 
     def on_closing(self):
-        """Handle window close event: always shut down the managed browser."""
-        if self.busy:
-            messagebox.showwarning("Operation Running", "Please wait for the current operation to finish before closing.")
-            return
-        driver, self.driver = self.driver, None
-        browser_was_open, self.browser_was_open = self.browser_was_open, False
-        if driver is not None:
-            print("🛑 Shutting down managed browser...")
-            graceful = shutdown_driver(driver)
-            if not graceful:
-                print("🛑 Forcing cleanup of orphaned Chrome processes...")
-                close_orphan_profile_chrome()
-        elif browser_was_open:
-            print("🛑 Driver reference lost; forcing cleanup of orphaned Chrome processes...")
-            close_orphan_profile_chrome()
+        """Close the window even when an operation or browser call is stuck."""
+        self.closing.set()
+        with self.driver_lock:
+            driver, self.driver = self.driver, None
+            browser_was_open, self.browser_was_open = self.browser_was_open, False
         self.destroy()
+        def cleanup():
+            if driver is not None:
+                if not shutdown_driver(driver):
+                    close_orphan_profile_chrome()
+            elif browser_was_open:
+                close_orphan_profile_chrome()
+        threading.Thread(target=cleanup, daemon=True).start()
 
 
 

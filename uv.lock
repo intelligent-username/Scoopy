@@ -202,7 +202,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scoopy-instagram-collections"
+name = "scoopy"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

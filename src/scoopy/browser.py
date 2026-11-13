@@ -37,6 +37,9 @@ def start_driver():
     print("🚀 Launching the managed browser for Scoopy (first run needs internet)...")
     options = webdriver.ChromeOptions()
     options.add_argument(f'--user-data-dir={CHROME_PROFILE_DIR}')
+    # Instagram can keep background requests open indefinitely; the user can
+    # log in as soon as the document is interactive.
+    options.page_load_strategy = 'eager'
     previous = os.environ.get(SE_FORCE_BROWSER_DOWNLOAD)
     os.environ[SE_FORCE_BROWSER_DOWNLOAD] = 'true'
     try:
@@ -53,6 +56,7 @@ def start_driver():
 
     try:
         driver.maximize_window()
+        driver.set_page_load_timeout(30)
         driver.get("https://www.instagram.com/")
     except Exception:
         driver.quit()
