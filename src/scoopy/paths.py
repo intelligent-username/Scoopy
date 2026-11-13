@@ -8,5 +8,3 @@ else:
 
 LINKS_FILE = os.path.join(BASE_DIR, 'links.txt')
 CHROME_PROFILE_DIR = os.path.join(BASE_DIR, '.chrome-profile')
-EDGE_PROFILE_DIR = os.path.join(BASE_DIR, '.edge-profile')
-FIREFOX_PROFILE_DIR = os.path.join(BASE_DIR, '.firefox-profile')
