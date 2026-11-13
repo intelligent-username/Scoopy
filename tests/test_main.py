@@ -34,80 +34,17 @@ def browser(cookies=None, url='https://www.instagram.com/user/saved/'):
 
 
 class BrowserTests(unittest.TestCase):
-    def candidates(self):
-        return [
-            browser_module.BrowserCandidate('chrome', 'Google Chrome', 'C:/browsers/chrome.exe',
-                                            browser_module.CHROME_PROFILE_DIR),
-            browser_module.BrowserCandidate('edge', 'Microsoft Edge', 'C:/browsers/edge.exe',
-                                            browser_module.EDGE_PROFILE_DIR),
-            browser_module.BrowserCandidate('firefox', 'Mozilla Firefox', 'C:/browsers/firefox.exe',
-                                            browser_module.FIREFOX_PROFILE_DIR),
-        ]
-
-    def test_start_driver_tries_installed_browsers_in_preference_order(self):
+    def test_start_driver_launches_managed_chrome_with_dedicated_profile(self):
         driver = Mock()
-        launches = []
-
-        def launch(candidate):
-            launches.append(candidate.kind)
-            if candidate.kind != 'firefox':
-                raise WebDriverException('failed')
-            return driver
-
-        with patch.object(browser_module, 'discover_browsers', return_value=self.candidates()), \
-                patch.object(browser_module, 'launch_browser', side_effect=launch), \
-                patch.object(browser_module, 'launch_managed_chrome') as managed:
+        with patch.object(browser_module.webdriver, 'Chrome', return_value=driver) as chrome:
             result = browser_module.start_driver()
-
         self.assertIs(result, driver)
-        self.assertEqual(launches, ['chrome', 'edge', 'firefox'])
-        managed.assert_not_called()
+        options = chrome.call_args.kwargs['options']
+        self.assertIn(f'--user-data-dir={browser_module.CHROME_PROFILE_DIR}', options.arguments)
         driver.maximize_window.assert_called_once()
         driver.get.assert_called_once_with('https://www.instagram.com/')
 
-    def test_start_driver_falls_back_to_managed_chrome_when_nothing_installed_works(self):
-        driver = Mock()
-        with patch.object(browser_module, 'discover_browsers', return_value=self.candidates()), \
-                patch.object(browser_module, 'launch_browser',
-                             side_effect=WebDriverException('failed')), \
-                patch.object(browser_module, 'launch_managed_chrome', return_value=driver) as managed:
-            result = browser_module.start_driver()
-        self.assertIs(result, driver)
-        managed.assert_called_once()
-
-    def test_start_driver_raises_actionable_error_when_no_browser_starts(self):
-        with patch.object(browser_module, 'discover_browsers', return_value=[]), \
-                patch.object(browser_module, 'launch_managed_chrome',
-                             side_effect=WebDriverException('network down')):
-            with self.assertRaisesRegex(session.AppError, 'Install Google Chrome'):
-                browser_module.start_driver()
-
-    def test_chromium_launch_sets_binary_and_dedicated_profile(self):
-        driver = Mock()
-        for kind, options_class, profile in (
-                ('chrome', browser_module.webdriver.ChromeOptions, browser_module.CHROME_PROFILE_DIR),
-                ('edge', browser_module.webdriver.EdgeOptions, browser_module.EDGE_PROFILE_DIR)):
-            with patch.object(browser_module.webdriver, 'Chrome' if kind == 'chrome' else 'Edge',
-                              return_value=driver) as constructor:
-                browser_module.launch_browser(self.candidates()[0 if kind == 'chrome' else 1])
-            options = constructor.call_args.kwargs['options']
-            self.assertIsInstance(options, options_class)
-            self.assertEqual(options.binary_location, f'C:/browsers/{kind}.exe')
-            self.assertIn(f'--user-data-dir={profile}', options.arguments)
-
-    def test_firefox_launch_uses_persistent_profile_argument(self):
-        # options.profile would unpack a temporary copy and lose the login;
-        # the --profile argument makes geckodriver use the directory in place.
-        driver = Mock()
-        with patch.object(browser_module.webdriver, 'Firefox', return_value=driver) as firefox:
-            browser_module.launch_browser(self.candidates()[2])
-        options = firefox.call_args.kwargs['options']
-        self.assertEqual(options.binary_location, 'C:/browsers/firefox.exe')
-        self.assertIn('--profile', options.arguments)
-        self.assertIn(browser_module.FIREFOX_PROFILE_DIR, options.arguments)
-        self.assertIsNone(options.profile)
-
-    def test_managed_fallback_forces_download_and_restores_environment(self):
+    def test_start_driver_forces_browser_download_and_restores_environment(self):
         driver = Mock()
         observed_during_call = []
 
@@ -118,56 +55,22 @@ class BrowserTests(unittest.TestCase):
         os.environ[browser_module.SE_FORCE_BROWSER_DOWNLOAD] = 'previous'
         try:
             with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment):
-                browser_module.launch_managed_chrome()
+                browser_module.start_driver()
         finally:
             restored = os.environ.pop(browser_module.SE_FORCE_BROWSER_DOWNLOAD)
         self.assertEqual(observed_during_call, ['true'])
         self.assertEqual(restored, 'previous')
 
         with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment):
-            browser_module.launch_managed_chrome()
+            browser_module.start_driver()
         self.assertNotIn(browser_module.SE_FORCE_BROWSER_DOWNLOAD, os.environ)
 
-    def test_discovery_reports_only_installed_executables_in_order(self):
-        found = {
-            'chrome': ['c:/browsers/chrome.exe', 'c:/browsers/chrome.exe'],
-            'edge': ['c:/browsers/missing.exe'],
-            'firefox': ['c:/browsers/firefox.exe'],
-        }
-        with patch.object(browser_module, '_discover_executables',
-                          side_effect=lambda system, kind: found[kind]), \
-                patch.object(browser_module.os.path, 'isfile',
-                             side_effect=lambda path: 'missing' not in path):
-            candidates = browser_module.discover_browsers()
-        self.assertEqual([candidate.kind for candidate in candidates], ['chrome', 'firefox'])
-        self.assertEqual([candidate.executable for candidate in candidates],
-                         ['c:\\browsers\\chrome.exe' if os.name == 'nt' else 'c:/browsers/chrome.exe',
-                          'c:\\browsers\\firefox.exe' if os.name == 'nt' else 'c:/browsers/firefox.exe'])
-        self.assertEqual(candidates[0].profile_dir, browser_module.CHROME_PROFILE_DIR)
-        self.assertEqual(candidates[1].profile_dir, browser_module.FIREFOX_PROFILE_DIR)
-
-    def test_windows_registry_lookup_unquotes_app_paths(self):
-        import winreg
-
-        class FakeKey:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        def fake_open(root, path):
-            return FakeKey()
-
-        def fake_query(key, name):
-            self.assertEqual(name, '')
-            return '"C:\\Tools\\chrome.exe"', winreg.REG_SZ
-
-        with patch.object(winreg, 'OpenKey', fake_open), \
-                patch.object(winreg, 'QueryValueEx', fake_query), \
-                patch.object(browser_module.platform, 'system', return_value='Windows'):
-            paths = browser_module._registry_executables('chrome')
-        self.assertEqual(paths, ['C:\\Tools\\chrome.exe'] * 4)
+    def test_start_driver_raises_actionable_error_when_browser_cannot_start(self):
+        with patch.object(browser_module.webdriver, 'Chrome',
+                          side_effect=WebDriverException('network down')):
+            with self.assertRaisesRegex(session.AppError, 'managed browser'):
+                browser_module.start_driver()
+        self.assertNotIn(browser_module.SE_FORCE_BROWSER_DOWNLOAD, os.environ)
 
 
 class CookieTests(unittest.TestCase):
@@ -451,12 +354,15 @@ class InlineThread:
 class AppTests(unittest.TestCase):
     def setUp(self):
         self.app = SimpleNamespace(
-            driver=browser(), busy=False, ui_queue=queue.Queue(), log_queue=queue.Queue(),
+            driver=browser(), busy=False, ui_queue=queue.Queue(), debug_queue=queue.Queue(),
             browser_button=Mock(), scrape_button=Mock(), download_button=Mock(),
-            folder_name_var=Mock(), after=Mock(), write_to_log=Mock(),
+            download_hint=Mock(), folder_name_var=Mock(), after=Mock(), write_to_debug=Mock(),
+            browser_was_open=False, destroy=Mock(),
         )
         self.app.folder_name_var.get.return_value = 'videos'
-        for name in ('update_buttons', 'start_operation', 'check_log_queue',
+        # The links-file gate in update_buttons must not depend on machine state.
+        self.enterContext(patch.object(ui.os.path, 'getsize', return_value=128))
+        for name in ('update_buttons', 'start_operation', 'check_debug_queue',
                      'start_download_thread', 'download_videos', 'start_scraping_thread',
                      'scrape_links', 'on_closing'):
             setattr(self.app, name, MethodType(getattr(ui.DownloaderApp, name), self.app))
@@ -470,7 +376,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(self.app.busy)
         callback.assert_not_called()
         self.messages.showinfo.assert_not_called()
-        self.app.check_log_queue()
+        self.app.check_debug_queue()
         callback.assert_called_once_with(42)
         self.assertFalse(self.app.busy)
         self.assertEqual(self.app.download_button.config.call_args.kwargs['state'], ui.tk.NORMAL)
@@ -482,7 +388,7 @@ class AppTests(unittest.TestCase):
         callback = Mock()
         self.app.start_operation(fail, callback)
         self.messages.showerror.assert_not_called()
-        self.app.check_log_queue()
+        self.app.check_debug_queue()
         self.assertFalse(self.app.busy)
         callback.assert_not_called()
         self.assertNotIn('secret', str(self.messages.showerror.call_args))
@@ -491,7 +397,7 @@ class AppTests(unittest.TestCase):
     def test_browser_disconnect_allows_browser_to_be_reopened(self):
         driver = self.app.driver
         self.app.start_operation(Mock(side_effect=WebDriverException('secret')), Mock())
-        self.app.check_log_queue()
+        self.app.check_debug_queue()
         driver.quit.assert_called_once()
         self.assertIsNone(self.app.driver)
         self.assertEqual(self.app.browser_button.config.call_args.kwargs['state'], ui.tk.NORMAL)
@@ -501,7 +407,7 @@ class AppTests(unittest.TestCase):
         driver = self.app.driver
         driver.get_cookies.return_value = []
         self.app.start_operation(lambda: session.read_browser_cookies(driver), Mock())
-        self.app.check_log_queue()
+        self.app.check_debug_queue()
         self.assertIs(self.app.driver, driver)
         self.assertFalse(self.app.busy)
         self.assertIn('No active Instagram login', self.messages.showerror.call_args.args[1])
@@ -516,6 +422,33 @@ class AppTests(unittest.TestCase):
         target.assert_not_called()
         self.app.driver.quit.assert_not_called()
         self.messages.showwarning.assert_called_once()
+
+    def test_close_quits_browser_gracefully_without_forcing(self):
+        driver = self.app.driver
+        self.app.browser_was_open = True
+        with patch.object(ui, 'close_orphan_profile_chrome') as force_close:
+            self.app.on_closing()
+        driver.quit.assert_called_once()
+        self.assertIsNone(self.app.driver)
+        self.assertFalse(self.app.browser_was_open)
+        force_close.assert_not_called()
+
+    def test_close_forces_profile_cleanup_when_quit_fails(self):
+        driver = self.app.driver
+        driver.quit.side_effect = WebDriverException('session dead')
+        with patch.object(ui, 'close_orphan_profile_chrome') as force_close:
+            self.app.on_closing()
+        driver.quit.assert_called_once()
+        force_close.assert_called_once()
+        self.assertIsNone(self.app.driver)
+
+    def test_close_cleans_orphan_when_driver_reference_was_lost(self):
+        self.app.driver = None
+        self.app.browser_was_open = True
+        with patch.object(ui, 'close_orphan_profile_chrome') as force_close:
+            self.app.on_closing()
+        force_close.assert_called_once()
+        self.assertFalse(self.app.browser_was_open)
 
     def test_download_requires_browser_not_cookie_file(self):
         self.app.driver = None

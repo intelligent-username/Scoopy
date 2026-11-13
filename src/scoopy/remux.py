@@ -12,7 +12,7 @@ import shutil
 
 from pymp4v2 import raw
 
-# Keep mp4v2 diagnostics out of the app's status log; failures are reported
+# Keep mp4v2 diagnostics out of the app's debug log; failures are reported
 # as RemuxError with a safe message instead.
 raw.MP4LogSetLevel(raw.MP4LogLevel.MP4_LOG_NONE)
 

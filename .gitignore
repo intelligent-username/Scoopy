@@ -3,4 +3,7 @@
 /.firefox-profile/
 
 **pycache**
+.pytest_cache/
+.venv/
 notes/
+links.txt
