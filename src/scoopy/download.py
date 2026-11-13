@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 from urllib.parse import urlsplit
 
@@ -10,6 +11,14 @@ from .session import AppError, is_instagram_domain
 
 WORK_DIR_NAME = '.scoopy-work'
 RECOVERY_DIR_NAME = 'recovery'
+
+# Only Instagram post links are accepted: /p/<code>, /reel/<code>,
+# /reels/<code>, where <code> is non-empty and contains no '/', '?' or '#'.
+_POST_PATH_RE = re.compile(r'^/(?:p|reel|reels)/[^/?#]+')
+
+# Invisible characters that ride along from copy/paste and would otherwise
+# silently break URL parsing (BOM, zero-width marks, word joiner).
+_INVISIBLE_TABLE = str.maketrans('', '', '\ufeff\u200b\u200c\u200d\u2060')
 
 # Protocols yt-dlp downloads natively (no external tool). Formats with other
 # protocols are skipped rather than handed to FFmpeg.
@@ -24,19 +33,22 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
     a recovery folder and the batch continues.
     """
     print(f"Reading links from {links_file}...")
-    with open(links_file, "r", encoding="utf-8") as f:
-        urls = [line.strip() for line in f if line.strip()]
-
-    if not urls:
+    lines = _read_link_lines(links_file)
+    if not lines:
         raise AppError("No links found. Scrape your Instagram collection first.")
 
-    for url in urls:
-        parsed = urlsplit(url)
-        if (parsed.scheme != 'https'
-                or not is_instagram_domain(parsed.hostname or '')
-                or parsed.username is not None
-                or not parsed.path.startswith(('/p/', '/reel/'))):
-            raise AppError("The links file contains a non-Instagram post URL. Scrape your collection again.")
+    urls, dropped = _collect_post_links(lines)
+    if dropped:
+        # Reasons are static categories keyed by line number; the URL text is
+        # never echoed so session material in a hand-pasted link cannot leak.
+        report = '\n'.join(f"  line {number}: {reason}" for number, reason in dropped)
+        print(f"⚠️ Dropped {len(dropped)} of {len(lines)} link(s) from the links file "
+              f"(only line numbers and reasons are shown):\n{report}")
+    if not urls:
+        raise AppError(
+            f"None of the {len(lines)} link(s) in the links file is a valid Instagram "
+            "post link. Scrape your Instagram collection again; the reasons each line "
+            "was rejected are listed above in the log.")
 
     os.makedirs(download_dir, exist_ok=True)
     work_root = os.path.join(download_dir, WORK_DIR_NAME)
@@ -65,12 +77,79 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
         details = '\n'.join(f"- {item}" for item in summary['failed'])
         raise AppError(
             f"{len(summary['failed'])} download(s) failed. Their downloaded media was kept in the "
-            f"'{RECOVERY_DIR_NAME}' folder inside the download folder. See the status log:\n{details}\n"
+            f"'{RECOVERY_DIR_NAME}' folder inside the download folder. See the debug log:\n{details}\n"
             "If Instagram requires login, log in again in the app's browser and retry. "
             "Private posts also require access from that account; Instagram may rate-limit downloads.")
 
     print("Download process finished.")
     return summary
+
+
+def _read_link_lines(links_file):
+    """Read the links file as cleaned, numbered, non-empty lines.
+
+    A UTF-8 BOM and CRLF line endings are tolerated, and undecodable bytes
+    become replacement characters that later fail URL validation instead of
+    crashing the run. Missing or unreadable files raise an actionable error
+    that says which state the file is in.
+    """
+    try:
+        with open(links_file, 'r', encoding='utf-8-sig', errors='replace') as f:
+            raw_lines = f.read().splitlines()
+    except FileNotFoundError:
+        raise AppError(
+            f"The links file {links_file} does not exist. Scrape your Instagram "
+            "collection first to create it.") from None
+    except OSError as error:
+        raise AppError(f"Could not read the links file {links_file}: {error}") from None
+    return [(number, cleaned)
+            for number, raw in enumerate(raw_lines, 1)
+            if (cleaned := raw.translate(_INVISIBLE_TABLE).strip())]
+
+
+def _collect_post_links(lines):
+    """Validate numbered lines; return (valid_urls, dropped) preserving order.
+
+    Only https:// Instagram post links (/p/, /reel/, /reels/) without embedded
+    credentials, query strings or fragments are kept, so tracking parameters
+    cannot vary between copies of the same post and dedupe stays exact.
+    Duplicate lines collapse to their first occurrence and are reported.
+    """
+    urls, dropped, seen = [], [], set()
+    for number, raw in lines:
+        url, reason = _validate_post_url(raw)
+        if reason is not None:
+            dropped.append((number, reason))
+        elif url in seen:
+            dropped.append((number, 'duplicate of an earlier link in the file'))
+        else:
+            seen.add(url)
+            urls.append(url)
+    return urls, dropped
+
+
+def _validate_post_url(raw):
+    """Return (normalized_url, None) for a post link, else (None, reason).
+
+    The reason is a static category string; it never contains the URL text so
+    cookie/session material inside a malformed link cannot reach the log.
+    """
+    try:
+        parsed = urlsplit(raw)
+        normalized = parsed._replace(query='', fragment='').geturl()
+    except ValueError:
+        return None, 'not a parsable URL'
+    if parsed.scheme != 'https':
+        return None, 'not an https:// link'
+    if not parsed.hostname:
+        return None, 'not a valid URL (no host)'
+    if parsed.username is not None or parsed.password is not None:
+        return None, 'contains embedded login credentials'
+    if not is_instagram_domain(parsed.hostname):
+        return None, 'not an Instagram link'
+    if not _POST_PATH_RE.match(parsed.path):
+        return None, 'not a post link (only /p/, /reel/ and /reels/ links are supported)'
+    return normalized, None
 
 
 def _process_url(url, download_dir, work_root, cookies, summary, counter):
@@ -267,7 +346,7 @@ def _safe_reason(error):
         return str(error)
     if isinstance(error, yt_dlp.utils.DownloadError):
         return "yt-dlp could not download this post (check Instagram login and rate limits)."
-    return "an unexpected error occurred (see the status log)."
+    return "an unexpected error occurred (see the debug log)."
 
 
 def print_progress(d):
