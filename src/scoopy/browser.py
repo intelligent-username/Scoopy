@@ -3,6 +3,7 @@ import re
 import tempfile
 import time
 from collections.abc import Iterable
+from threading import Event
 from urllib.parse import urlsplit
 
 from selenium import webdriver
@@ -10,6 +11,7 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 
 from .paths import CHROME_PROFILE_DIR, LINKS_FILE
+from .cancellation import check_cancel, wait_cancel
 from .session import AppError
 
 # --- Scraping Logic ---
@@ -116,14 +118,16 @@ def _post_url_from_href(href: str | None) -> str | None:
     kind = 'p' if match['kind'] == 'p' else 'reel'
     return f"{INSTAGRAM_ORIGIN}/{kind}/{match['code']}"
 
-def _candidate_hrefs(driver):
+def _candidate_hrefs(driver, *, cancel_event: Event | None = None):
     """
     Gathers href values from every candidate element on the page: real anchors
     plus Instagram's role="link" wrappers. Stale elements are ignored.
     """
     hrefs = []
     for selector in (ANCHOR_SELECTOR, FALLBACK_SELECTOR):
+        check_cancel(cancel_event)
         for element in driver.find_elements(By.CSS_SELECTOR, selector):
+            check_cancel(cancel_event)
             try:
                 href = element.get_attribute("href")
             except Exception:
@@ -132,7 +136,8 @@ def _candidate_hrefs(driver):
                 hrefs.append(href)
     return hrefs
 
-def _wait_for_first_link(driver, *, collection_deadline: float | None = None):
+def _wait_for_first_link(driver, *, collection_deadline: float | None = None,
+                         cancel_event: Event | None = None):
     """
     Waits until at least one post/reel link is present (grids can take a while
     to hydrate after the page opens), or until FIRST_LINK_TIMEOUT elapses.
@@ -141,9 +146,13 @@ def _wait_for_first_link(driver, *, collection_deadline: float | None = None):
     if collection_deadline is not None:
         deadline = min(deadline, collection_deadline)
     while time.monotonic() < deadline:
-        if any(_post_url_from_href(href) for href in _candidate_hrefs(driver)):
+        check_cancel(cancel_event)
+        if any(_post_url_from_href(href) for href in
+               _candidate_hrefs(driver, cancel_event=cancel_event)):
+            check_cancel(cancel_event)
             return True
-        time.sleep(min(FIRST_LINK_POLL, max(0, deadline - time.monotonic())))
+        wait_cancel(cancel_event, min(FIRST_LINK_POLL, max(0, deadline - time.monotonic())))
+    check_cancel(cancel_event)
     return False
 
 SCROLL_SCRIPT = """
@@ -183,7 +192,8 @@ return target.scrollTop > before;
 """
 
 
-def collect_reel_links(driver: webdriver.Remote) -> list[str]:
+def collect_reel_links(driver: webdriver.Remote, *,
+                       cancel_event: Event | None = None) -> list[str]:
     """
     Collects all unique post/reel links from the currently open page.
     Assumes the user is already logged in and on a collection/profile page.
@@ -194,9 +204,11 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
     Returns:
         A list of unique, sorted links.
     """
+    check_cancel(cancel_event)
     print("🔎 Starting link collection. Waiting for the grid to load...")
     deadline = time.monotonic() + MAX_COLLECTION_SECONDS
-    if not _wait_for_first_link(driver, collection_deadline=deadline):
+    if not _wait_for_first_link(driver, collection_deadline=deadline,
+                                cancel_event=cancel_event):
         print("⚠️ No initial post links. Checking the grid while scrolling.")
 
     print("🔎 Checking post links and scrolling the grid.")
@@ -206,11 +218,13 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
     bottom_checks = 0
 
     for _ in range(MAX_SCROLL_ROUNDS):
+        check_cancel(cancel_event)
         if time.monotonic() >= deadline:
             print("⚠️ Collection time limit reached; results may be incomplete.")
             break
         supported_hrefs = []
-        for href in _candidate_hrefs(driver):
+        for href in _candidate_hrefs(driver, cancel_event=cancel_event):
+            check_cancel(cancel_event)
             post_url = _post_url_from_href(href)
             if post_url:
                 seen.add(post_url)
@@ -227,6 +241,7 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
 
         if no_new_rounds >= MAX_NO_NEW_ROUNDS:
             break
+        check_cancel(cancel_event)
         moved = driver.execute_script(SCROLL_SCRIPT, supported_hrefs)
         if moved is False and no_new_rounds:
             bottom_checks += 1
@@ -235,10 +250,11 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
                 break
         else:
             bottom_checks = 0
-        time.sleep(min(SCROLL_PAUSE, max(0, deadline - time.monotonic())))
+        wait_cancel(cancel_event, min(SCROLL_PAUSE, max(0, deadline - time.monotonic())))
     else:
         print("⚠️ Collection scroll limit reached; results may be incomplete.")
 
+    check_cancel(cancel_event)
     if not seen:
         raise AppError(
             "No supported post links were found. Open the saved collection's "
@@ -246,6 +262,7 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
             "and try Scrape Links again. Tiles without post/reel hrefs are not "
             "supported. Your existing saved links were kept.")
     print(f"\n✅ Finished scrolling. Total unique links: {len(seen)}")
+    check_cancel(cancel_event)
     return sorted(seen)
 
 def save_links(links: Iterable[str]) -> None:

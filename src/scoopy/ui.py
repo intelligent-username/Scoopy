@@ -14,6 +14,7 @@ from selenium.common.exceptions import WebDriverException
 
 from . import download as media_download
 from .browser import start_driver, collect_reel_links, save_links
+from .cancellation import OperationCancelled, check_cancel
 from .download import RECOVERY_DIR_NAME, has_failed_media, remove_failed_media, start_download
 from .paths import BASE_DIR, CHROME_PROFILE_DIR, LINKS_FILE
 from .session import AppError, navigate_to_saved, read_browser_cookies
@@ -67,8 +68,10 @@ class DownloaderApp(tk.Tk):
         self.debug_queue = queue.Queue()
         self.ui_queue = queue.Queue()
         self.busy = False
+        self.operation_event: threading.Event | None = None
         self.closing = threading.Event()
         self.driver_lock = threading.Lock()
+        self.retry_states: dict[str, media_download.DownloadRetryState] = {}
 
         self.setup_ui()
         self.configure_styles()
@@ -132,6 +135,16 @@ class DownloaderApp(tk.Tk):
         self.download_button = ttk.Button(scraping_frame, text="Download collection",
                                            command=self.start_download_thread, style="Primary.TButton")
         self.download_button.pack(fill=tk.X, pady=(12, 0))
+
+        self.retry_button = ttk.Button(
+            scraping_frame, text="Retry failed",
+            command=self.start_retry_failed_thread, style="Secondary.TButton")
+        self.continue_button = ttk.Button(
+            scraping_frame, text="Continue remaining",
+            command=self.start_continue_remaining_thread, style="Secondary.TButton")
+        self.cancel_button = ttk.Button(
+            scraping_frame, text="Cancel", command=self.cancel_operation,
+            style="Secondary.TButton")
 
         # Inline empty-state hint, toggled by update_buttons() when links.txt
         # is missing or empty so the disabled download button explains itself.
@@ -315,16 +328,38 @@ class DownloaderApp(tk.Tk):
             self.download_hint.pack(fill=tk.X, pady=(8, 0))
         if self.__dict__.get('remove_failed_button') is not None:
             self._refresh_recovery_button()
+        if self.__dict__.get('retry_button') is not None:
+            self._refresh_retry_button()
+        if self.__dict__.get('cancel_button') is not None:
+            event = self.operation_event
+            if self.busy and event is not None:
+                self.cancel_button.config(
+                    text="Cancelling…" if event.is_set() else "Cancel",
+                    state=tk.DISABLED if event.is_set() else tk.NORMAL)
+                if not self.cancel_button.winfo_manager():
+                    self.cancel_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+            else:
+                self.cancel_button.pack_forget()
 
-    def start_operation(self, target, on_success):
+    def cancel_operation(self):
+        """Request cancellation; worker cleanup still owns operation completion."""
+        if self.busy and self.operation_event is not None:
+            self.operation_event.set()
+            self.update_buttons()
+
+    def start_operation(self, target, on_success, *, cancellable=False):
         if self.busy:
             return
         self.busy = True
+        event = threading.Event() if cancellable else None
+        self.operation_event = event
         self.update_buttons()
 
         def work():
             try:
-                result = target()
+                result = target(event) if cancellable else target()
+            except OperationCancelled as result:
+                self.ui_queue.put((result, None, on_success))
             except WebDriverException:
                 driver, self.driver = self.driver, None
                 if driver is not None:
@@ -349,6 +384,7 @@ class DownloaderApp(tk.Tk):
             threading.Thread(target=work, daemon=True).start()
         except RuntimeError:
             self.busy = False
+            self.operation_event = None
             self.update_buttons()
             messagebox.showerror("Worker Error", "Could not start a worker. Please try again.")
 
@@ -363,6 +399,32 @@ class DownloaderApp(tk.Tk):
             self.folder_path_label.config(text="Enter a folder name above.")
         if self.__dict__.get('remove_failed_button') is not None:
             self._refresh_recovery_button()
+        if self.__dict__.get('retry_button') is not None:
+            self._refresh_retry_button()
+
+    def _refresh_retry_button(self):
+        """Offer separate failed and remaining actions for the selected folder."""
+        name = self.folder_name_var.get().strip()
+        directory = os.path.normcase(os.path.abspath(os.path.join(BASE_DIR, name)))
+        state = self.retry_states.get(directory) if name else None
+        if state is not None and state.failed_urls:
+            self.retry_button.config(
+                text=f"Retry failed ({len(state.failed_urls)})",
+                state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
+            if not self.retry_button.winfo_manager():
+                self.retry_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+        else:
+            self.retry_button.pack_forget()
+        if self.__dict__.get('continue_button') is not None:
+            if state is not None and state.remaining_urls:
+                self.continue_button.config(
+                    text=f"Continue remaining ({len(state.remaining_urls)})",
+                    state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
+                if not self.continue_button.winfo_manager():
+                    self.continue_button.pack(
+                        fill=tk.X, pady=(8, 0), before=self.download_hint)
+            else:
+                self.continue_button.pack_forget()
 
     def _refresh_recovery_button(self):
         """Show cleanup only for failed media in the selected download folder."""
@@ -560,24 +622,28 @@ class DownloaderApp(tk.Tk):
 
         print("🔎 Scrape button clicked — starting link scraping...")
         self.start_operation(self.scrape_links,
-                             lambda count: messagebox.showinfo("Scraping Complete", scrape_summary(count)))
+                             lambda count: messagebox.showinfo("Scraping Complete", scrape_summary(count)),
+                             cancellable=True)
 
-    def scrape_links(self):
+    def scrape_links(self, cancel_event=None):
         """
         Runs in a thread. Uses the existing driver to scrape links.
         """
         print("🔎 [thread] Starting scrape_links...")
+        check_cancel(cancel_event)
         cookies = read_browser_cookies(self.driver)
         cookies.clear()
         print("✅ Logged into Instagram.")
         print("🔎 [thread] Cookies read, collecting links...")
-        links = collect_reel_links(self.driver)
+        links = collect_reel_links(self.driver, cancel_event=cancel_event)
+        check_cancel(cancel_event)
         print(f"🔎 [thread] collect_reel_links returned {len(links)} links")
         if not links:
             raise AppError(
                 "No post links were collected. Open your saved collection's "
                 "post grid, wait for thumbnails to load, and retry Scrape Links. "
                 "Your existing saved links were kept.")
+        check_cancel(cancel_event)
         save_links(links)
         print(f"✅ [thread] Scraping complete. {len(links)} links saved.")
         return len(links)
@@ -605,15 +671,65 @@ class DownloaderApp(tk.Tk):
         download_dir_path = os.path.join(BASE_DIR, download_dir_name)
 
         print(f"📁 Download folder set to: {download_dir_path}")
-        self.start_operation(lambda: self.download_videos(download_dir_path),
+        self.start_operation(lambda event: self.download_videos(
+                                 download_dir_path, cancel_event=event),
                              lambda result: messagebox.showinfo(
-                                 "Download Complete", download_summary(result)))
+                                 "Download Complete", download_summary(result)),
+                             cancellable=True)
 
-    def download_videos(self, download_dir):
+    def start_retry_failed_thread(self):
+        if self.busy or self.closing.is_set():
+            return
+        if self.driver is None:
+            messagebox.showwarning("Login required", "Open the browser and log in first.")
+            return
+        name = self.folder_name_var.get().strip()
+        if not name:
+            return
+        directory = os.path.abspath(os.path.join(BASE_DIR, name))
+        state = self.retry_states.get(os.path.normcase(directory))
+        if state is None or not state.failed_urls:
+            self._refresh_retry_button()
+            return
+        self.start_operation(
+            lambda event: self.download_videos(
+                directory, retry_failed=True, cancel_event=event),
+            lambda result: messagebox.showinfo("Retry complete", download_summary(result)),
+            cancellable=True)
+
+    def start_continue_remaining_thread(self):
+        if self.busy or self.closing.is_set():
+            return
+        if self.driver is None:
+            messagebox.showwarning("Login required", "Open the browser and log in first.")
+            return
+        name = self.folder_name_var.get().strip()
+        if not name:
+            return
+        directory = os.path.abspath(os.path.join(BASE_DIR, name))
+        state = self.retry_states.get(os.path.normcase(directory))
+        if state is None or not state.remaining_urls:
+            self._refresh_retry_button()
+            return
+        self.start_operation(
+            lambda event: self.download_videos(
+                directory, continue_remaining=True, cancel_event=event),
+            lambda result: messagebox.showinfo(
+                "Download complete", download_summary(result)),
+            cancellable=True)
+
+    def download_videos(self, download_dir, *, retry_failed=False,
+                        continue_remaining=False, cancel_event=None):
+        check_cancel(cancel_event)
         cookies = read_browser_cookies(self.driver)
         try:
             print("🍪 Using the app browser's Instagram session in memory (no cookies file).")
-            return start_download(download_dir, cookies)
+            states = self.__dict__.setdefault('retry_states', {})
+            directory = os.path.normcase(os.path.abspath(download_dir))
+            state = states.setdefault(directory, media_download.DownloadRetryState())
+            return start_download(
+                download_dir, cookies, retry_state=state, retry_failed=retry_failed,
+                continue_remaining=continue_remaining, cancel_event=cancel_event)
         finally:
             cookies.clear()
 
@@ -673,6 +789,8 @@ class DownloaderApp(tk.Tk):
     def _level_tag(text: str) -> str:
         """Choose a configured text tag without depending on a Tk attribute."""
         lower = text.lower()
+        if 'cancelled' in lower or 'cancelling' in lower:
+            return ''
         if any(word in lower for word in ('error', 'failed', 'exception', 'traceback')):
             return 'error'
         if any(word in lower for word in ('warning', 'could not', 'no saved')) or '⚠' in text:
@@ -779,12 +897,16 @@ class DownloaderApp(tk.Tk):
                 except queue.Empty:
                     break
                 self.busy = False
+                self.operation_event = None
                 try:
                     self.update_buttons()
                     result, error, on_success = completion
                     if not app_alive():
                         return
-                    if error:
+                    if isinstance(result, OperationCancelled):
+                        print(str(result))
+                        messagebox.showinfo("Operation cancelled", str(result))
+                    elif error:
                         print(error)
                         messagebox.showerror("Operation Failed", error)
                     else:
@@ -891,13 +1013,13 @@ def download_summary(result: dict[str, object]) -> str:
             or result.get('failed')):
         raise ValueError("Invalid download summary.")
     videos = "1 video" if result['downloaded'] == 1 else f"{result['downloaded']} videos"
-    silent = "1 without audio" if result['silent'] == 1 else f"{result['silent']} without audio"
+    silent = f" ({silent_count} without audio)" if silent_count else ""
     if photo_count:
         photos = "1 photo" if photo_count == 1 else f"{photo_count} photos"
         if downloaded == 0:
             return f"Downloaded {photos}."
-        return f"Downloaded {photos} and {videos} ({silent})."
-    return f"Downloaded {videos} ({silent})."
+        return f"Downloaded {photos} and {videos}{silent}."
+    return f"Downloaded {videos}{silent}."
 
 
 def scrape_summary(count):

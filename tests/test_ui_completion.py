@@ -79,7 +79,7 @@ class UiCompletionTests(unittest.TestCase):
         main_thread = threading.get_ident()
         worker_threads = []
 
-        def download(path, passed_cookies):
+        def download(path, passed_cookies, **options):
             worker_threads.append(threading.get_ident())
             self.assertIs(passed_cookies, cookies)
             self.assertEqual(passed_cookies[0]["value"], "PRIVATE_SESSION")
@@ -276,7 +276,7 @@ class UiCompletionTests(unittest.TestCase):
 
     def test_summary_pluralization_and_zero_counts(self):
         for downloaded, silent, expected in (
-            (0, 0, "Downloaded 0 videos (0 without audio)."),
+            (0, 0, "Downloaded 0 videos."),
             (1, 1, "Downloaded 1 video (1 without audio)."),
             (2, 2, "Downloaded 2 videos (2 without audio)."),
         ):

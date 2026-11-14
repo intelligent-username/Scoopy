@@ -2,12 +2,15 @@ import os
 import re
 import shutil
 import stat
+from dataclasses import dataclass, field
+from threading import Event
 from urllib.parse import urlsplit
 
 import yt_dlp
 from yt_dlp.extractor.instagram import InstagramIE as _InstagramIE
 
 from . import remux
+from .cancellation import OperationCancelled, check_cancel
 from .paths import LINKS_FILE
 from .session import AppError, is_instagram_domain
 
@@ -30,6 +33,15 @@ _INVISIBLE_TABLE = str.maketrans('', '', '\ufeff\u200b\u200c\u200d\u2060')
 # Protocols yt-dlp downloads natively (no external tool). Formats with other
 # protocols are skipped rather than handed to FFmpeg.
 _EXTERNAL_TOOL_PROTOCOLS = ('rtmp', 'rtmpe', 'rtmps', 'rtmpt', 'rtmpte', 'rtmpts', 'mms', 'f4m')
+
+@dataclass
+class DownloadRetryState:
+    """Session-only failed/pending posts and saved carousel entries for one folder."""
+
+    directory: str = ''
+    failed_urls: list[str] = field(default_factory=list)
+    completed_entries: dict[str, set[str]] = field(default_factory=dict)
+    remaining_urls: list[str] = field(default_factory=list)
 
 
 class InstagramIE(_InstagramIE):
@@ -78,15 +90,30 @@ class InstagramIE(_InstagramIE):
         }
 
 
-def start_download(download_dir, cookies, links_file=LINKS_FILE):
+def start_download(download_dir, cookies, links_file=LINKS_FILE, *,
+                   retry_state: DownloadRetryState | None = None, retry_failed: bool = False,
+                   continue_remaining: bool = False, cancel_event: Event | None = None):
     """
     Downloads photos and videos from each linked post. Prefers a verified combined MP4. Separate
     video/audio streams are combined with pymp4v2 (no FFmpeg). Videos without
     an audio track are saved and reported as silent. Failed media is kept in
     a recovery folder and the batch continues.
     """
-    print(f"📄 Reading links from {links_file}...")
-    lines = _read_link_lines(links_file)
+    directory = os.path.normcase(os.path.abspath(download_dir))
+    if retry_failed and continue_remaining:
+        raise AppError("Choose either retry failed or continue remaining, not both.")
+    selected_mode = retry_failed or continue_remaining
+    if selected_mode:
+        selected = (retry_state.failed_urls if retry_failed else retry_state.remaining_urls
+                    ) if retry_state is not None else []
+        if (retry_state is None or not selected
+                or retry_state.directory != directory):
+            raise AppError("There are no posts in the selected queue for this download folder.")
+        lines = list(enumerate(tuple(selected), 1))
+        print(f"Processing only {len(lines)} queued post(s).")
+    else:
+        print(f"📄 Reading links from {links_file}...")
+        lines = _read_link_lines(links_file)
     if not lines:
         raise AppError("No links found. Scrape your Instagram collection first.")
 
@@ -105,6 +132,14 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
 
     os.makedirs(download_dir, exist_ok=True)
     work_root = os.path.join(download_dir, WORK_DIR_NAME)
+    state = retry_state if retry_state is not None else DownloadRetryState()
+    if not selected_mode:
+        state.completed_entries.clear()
+        state.failed_urls.clear()
+        state.remaining_urls.clear()
+    state.directory = directory
+    state.failed_urls = [url for url in state.failed_urls if url not in urls]
+    state.remaining_urls = list(dict.fromkeys([*state.remaining_urls, *urls]))
 
     print(f"📥 Found {len(urls)} links to download.")
     summary = {'downloaded': 0, 'silent': 0, 'failed': []}
@@ -112,19 +147,42 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
 
     try:
         for url in urls:
+            check_cancel(cancel_event)
+            failures_before = len(summary['failed'])
             try:
-                _process_url(url, download_dir, work_root, cookies, summary, counter)
+                options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+                if retry_state is not None:
+                    options['completed_entries'] = state.completed_entries.setdefault(url, set())
+                _process_url(url, download_dir, work_root, cookies, summary, counter, **options)
+            except OperationCancelled:
+                raise
             except yt_dlp.utils.DownloadError:
+                check_cancel(cancel_event)
                 summary['failed'].append(
                     f"{url}: yt-dlp could not download this post (check Instagram login and rate limits).")
                 print(f"⚠️ Failed: {url}. Media was not downloaded. Continuing.")
             except remux.RemuxError as error:
+                check_cancel(cancel_event)
                 summary['failed'].append(f"{url}: {error}")
                 print(f"⚠️ Failed: {url}. {error} Continuing.")
+            except Exception:
+                check_cancel(cancel_event)
+                raise
+            state.remaining_urls.remove(url)
+            if len(summary['failed']) != failures_before:
+                state.failed_urls.append(url)
+            check_cancel(cancel_event)
+    except OperationCancelled:
+        saved = summary['downloaded'] + summary.get('photos', 0)
+        raise OperationCancelled(
+            f"Download cancelled — {saved} saved, {len(state.failed_urls)} failed, "
+            f"{len(state.remaining_urls)} remaining") from None
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
-    print(f"📥 Downloaded {summary['downloaded']} videos ({summary['silent']} without audio).")
+    videos = "1 video" if summary['downloaded'] == 1 else f"{summary['downloaded']} videos"
+    silent = f" ({summary['silent']} without audio)" if summary['silent'] else ""
+    print(f"📥 Downloaded {videos}{silent}.")
     if summary.get('photos'):
         print(f"Downloaded {summary['photos']} photos.")
 
@@ -207,26 +265,49 @@ def _validate_post_url(raw):
     return normalized, None
 
 
-def _process_url(url, download_dir, work_root, cookies, summary, counter):
-    with yt_dlp.YoutubeDL(_base_options(work_root)) as ydl:
+def _process_url(url, download_dir, work_root, cookies, summary, counter, *,
+                 completed_entries: set[str] | None = None, cancel_event: Event | None = None):
+    check_cancel(cancel_event)
+    options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+    with yt_dlp.YoutubeDL(_base_options(work_root, **options)) as ydl:
         ydl.add_info_extractor(InstagramIE())
         for cookie in cookies:
             ydl.cookiejar.set_cookie(cookie)
+        check_cancel(cancel_event)
         info = ydl.extract_info(url, download=False)
+    check_cancel(cancel_event)
     entries = [entry for entry in (info.get('entries') or [info]) if entry] if info else []
     if not entries:
         raise remux.RemuxError("No media entries found for this post.")
-    for entry in entries:
-        _process_entry(entry, download_dir, work_root, cookies, summary, next(counter))
+    for position, entry in enumerate(entries):
+        check_cancel(cancel_event)
+        entry_key = str(entry.get('id') or f'entry-position-{position}')
+        if completed_entries is not None and entry_key in completed_entries:
+            print("Skipping an item already saved from this post.")
+            continue
+        failures_before = len(summary['failed'])
+        _process_entry(entry, download_dir, work_root, cookies, summary, next(counter), **options)
+        if completed_entries is not None and len(summary['failed']) == failures_before:
+            completed_entries.add(entry_key)
+        check_cancel(cancel_event)
 
 
-def _process_entry(entry, download_dir, work_root, cookies, summary, index):
+def _process_entry(entry, download_dir, work_root, cookies, summary, index, *,
+                   cancel_event: Event | None = None):
     entry_id = str(entry.get('id') or index)
     work_dir = os.path.join(work_root, f'entry-{index:04d}')
     os.makedirs(work_dir, exist_ok=True)
     try:
-        path, silent = _download_entry(entry, download_dir, work_dir, cookies, index)
+        check_cancel(cancel_event)
+        options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+        path, silent = _download_entry(entry, download_dir, work_dir, cookies, index, **options)
+    except OperationCancelled:
+        _keep_for_recovery(work_dir, download_dir)
+        raise
     except Exception as error:
+        if cancel_event is not None and cancel_event.is_set():
+            _keep_for_recovery(work_dir, download_dir)
+            check_cancel(cancel_event)
         reason = _safe_reason(error)
         _keep_for_recovery(work_dir, download_dir)
         summary['failed'].append(f"Post {entry_id}: {reason}")
@@ -245,10 +326,13 @@ def _process_entry(entry, download_dir, work_root, cookies, summary, index):
         print(f"✅ Saved {os.path.basename(path)}")
 
 
-def _download_entry(entry, download_dir, work_dir, cookies, index):
+def _download_entry(entry, download_dir, work_dir, cookies, index, *,
+                    cancel_event: Event | None = None):
     """Download one post entry and return (published_path, silent)."""
+    check_cancel(cancel_event)
+    options = {'cancel_event': cancel_event} if cancel_event is not None else {}
     if entry.get('_scoopy_photo'):
-        path = _single_file(_download_formats(entry, 'scoopy-photo', work_dir, cookies))
+        path = _single_file(_download_formats(entry, 'scoopy-photo', work_dir, cookies, **options))
         with open(path, 'rb') as image:
             header = image.read(16)
         if header.startswith(b'\xff\xd8\xff'):
@@ -259,36 +343,40 @@ def _download_entry(entry, download_dir, work_dir, cookies, index):
             extension = '.webp'
         else:
             raise remux.RemuxError("The downloaded photo is not a supported image file.")
-        return _publish(path, download_dir, extension=extension), False
+        return _publish(path, download_dir, extension=extension, **options), False
     combined, video, audio = _select_formats(entry.get('formats') or [])
 
     if combined is not None:
-        path = _single_file(_download_formats(entry, combined['format_id'], work_dir, cookies))
+        path = _single_file(_download_formats(entry, combined['format_id'], work_dir, cookies, **options))
+        check_cancel(cancel_event)
         info = remux.validate_video_stream(path)
         if _readable_audio(info):
-            return _publish(path, download_dir), False
+            return _publish(path, download_dir, **options), False
         video_path = path
     else:
         if video is None:
             raise remux.RemuxError(
                 "No compatible MP4 format was found. The post may expose only "
                 "unsupported codecs or fragmented streams.")
-        video_path = _single_file(_download_formats(entry, video['format_id'], work_dir, cookies))
+        video_path = _single_file(_download_formats(entry, video['format_id'], work_dir, cookies, **options))
+        check_cancel(cancel_event)
         remux.validate_video_stream(video_path)
 
     if audio is None:
         # No audio format exists, but missing format metadata is not proof of
         # silence; inspect the actual file before calling it a silent video.
         has_audio = _readable_audio(remux.inspect_media(video_path))
-        return _publish(video_path, download_dir), not has_audio
+        return _publish(video_path, download_dir, **options), not has_audio
 
     audio_path = _single_file(_download_formats(
-        entry, audio['format_id'], os.path.join(work_dir, 'audio'), cookies))
+        entry, audio['format_id'], os.path.join(work_dir, 'audio'), cookies, **options))
+    check_cancel(cancel_event)
     remux.validate_audio_stream(audio_path)
     combined_path = os.path.join(work_dir, f'scoopy-combined-{index}.mp4')
-    remux.remux_to_mp4(video_path, audio_path, combined_path)
+    check_cancel(cancel_event)
+    remux.remux_to_mp4(video_path, audio_path, combined_path, **options)
     base_name = os.path.splitext(os.path.basename(video_path))[0]
-    return _publish(combined_path, download_dir, base_name), False
+    return _publish(combined_path, download_dir, base_name, **options), False
 
 
 def _readable_audio(info):
@@ -349,8 +437,8 @@ def _needs_external_tool(fmt):
     return any(protocol.startswith(name) for name in _EXTERNAL_TOOL_PROTOCOLS)
 
 
-def _base_options(out_dir):
-    return {
+def _base_options(out_dir, *, cancel_event: Event | None = None):
+    options = {
         'outtmpl': os.path.join(out_dir, '%(upload_date)s_%(title)s.%(ext)s'),
         'ignoreerrors': False,
         'continuedl': True,
@@ -360,20 +448,27 @@ def _base_options(out_dir):
         'cachedir': False,
         'writethumbnail': False,
         'write_all_thumbnails': False,
+        'socket_timeout': 15,
     }
+    if cancel_event is not None:
+        options['progress_hooks'] = [lambda data: check_cancel(cancel_event)]
+    return options
 
 
-def _download_formats(entry, format_id, work_dir, cookies):
+def _download_formats(entry, format_id, work_dir, cookies, *, cancel_event: Event | None = None):
     """Download exactly one format into work_dir; return the finished files."""
+    check_cancel(cancel_event)
     files = []
 
     def collect(d):
+        check_cancel(cancel_event)
         if d.get('status') == 'finished':
             files.append(d['filename'])
 
-    options = _base_options(work_dir)
+    options = _base_options(work_dir, **(
+        {'cancel_event': cancel_event} if cancel_event is not None else {}))
     options['format'] = format_id
-    options['progress_hooks'] = [print_progress, collect]
+    options['progress_hooks'] = options.get('progress_hooks', []) + [print_progress, collect]
     print(f"  📥 Downloading format {format_id}...")
     with yt_dlp.YoutubeDL(options) as ydl:
         # No cookiefile/cookiesfrombrowser: yt-dlp will not persist this jar.
@@ -387,7 +482,9 @@ def _download_formats(entry, format_id, work_dir, cookies):
             for key in ('url', 'format_id', 'ext', 'protocol', 'vcodec', 'acodec',
                         'fragments', 'fragment_base_url', 'manifest_url'):
                 clean_entry.pop(key, None)
+        check_cancel(cancel_event)
         ydl.process_ie_result(clean_entry, download=True)
+    check_cancel(cancel_event)
     return [path for path in files if os.path.isfile(path)]
 
 
@@ -404,8 +501,10 @@ def _sanitize_name(name):
     return cleaned.strip().strip('.')[:150]
 
 
-def _publish(path, download_dir, base_name=None, *, extension='.mp4'):
+def _publish(path, download_dir, base_name=None, *, extension='.mp4',
+             cancel_event: Event | None = None):
     """Publish finished media in its protected folder without replacing files."""
+    check_cancel(cancel_event)
     extension = extension.lower()
     if extension == '.mp4':
         directory_name = COMPLETED_VIDEO_DIR_NAME
@@ -424,6 +523,7 @@ def _publish(path, download_dir, base_name=None, *, extension='.mp4'):
     while os.path.lexists(candidate):
         candidate = os.path.join(destination, f'{base} ({number}){extension}')
         number += 1
+    check_cancel(cancel_event)
     shutil.move(path, candidate)
     return candidate
 
