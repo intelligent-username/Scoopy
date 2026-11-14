@@ -2,6 +2,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from selenium.common.exceptions import WebDriverException
 from .browser import start_driver, collect_reel_links, save_links
 from .download import start_download
 from .paths import BASE_DIR, CHROME_PROFILE_DIR, LINKS_FILE
-from .session import AppError, read_browser_cookies
+from .session import AppError, navigate_to_saved, read_browser_cookies
 
 APP_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'app-icon.png')
 APP_ICON_ICO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'app-icon.ico')
@@ -99,7 +100,7 @@ class DownloaderApp(tk.Tk):
         self.folder_name_var.trace_add('write', lambda *_: self._update_folder_path())
         self._update_folder_path()
 
-        scraping_frame = ttk.Labelframe(main_frame, text="2. Download Videos", padding=12)
+        scraping_frame = ttk.Labelframe(main_frame, text="2. Download Photos and Videos", padding=12)
         scraping_frame.pack(fill=tk.X, pady=16)
 
         self.browser_button = ttk.Button(scraping_frame, text="Open Browser",
@@ -112,7 +113,7 @@ class DownloaderApp(tk.Tk):
 
         # Same workflow as scraping: log in -> scrape -> download, so the
         # download action lives in this section instead of its own box.
-        self.download_button = ttk.Button(scraping_frame, text="Download All Videos",
+        self.download_button = ttk.Button(scraping_frame, text="Download Collection",
                                           command=self.start_download_thread, style="Primary.TButton")
         self.download_button.pack(fill=tk.X, ipady=10, pady=(12, 0))
 
@@ -121,10 +122,10 @@ class DownloaderApp(tk.Tk):
         self.download_hint = ttk.Label(scraping_frame, text="", style="Hint.TLabel")
         self.download_hint.pack(fill=tk.X, pady=(8, 0))
 
-        view_frame = ttk.Labelframe(main_frame, text="3. View Videos", padding=12)
+        view_frame = ttk.Labelframe(main_frame, text="3. View Downloads", padding=12)
         view_frame.pack(fill=tk.X, pady=(0, 16))
 
-        self.view_button = ttk.Button(view_frame, text="Open Videos Folder",
+        self.view_button = ttk.Button(view_frame, text="Open Download Folder",
                                       command=self.view_videos, style="Secondary.TButton")
         self.view_button.pack(fill=tk.X, ipady=5)
 
@@ -275,7 +276,7 @@ class DownloaderApp(tk.Tk):
             text="Scrape Links",
             state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
         self.download_button.config(
-            text="Working…" if self.busy else "Download All Videos",
+            text="Working…" if self.busy else "Download Collection",
             state=tk.DISABLED if self.busy or not links_ready else tk.NORMAL)
         self.download_hint.config(
             text="" if links_ready or self.busy
@@ -362,6 +363,14 @@ class DownloaderApp(tk.Tk):
         """
         Runs in a thread. Opens the browser and stores the driver instance.
         """
+        from .browser_cleanup import start_cleanup
+
+        with self.driver_lock:
+            if self.closing.is_set():
+                return
+            # Record launch intent so close also scans for a not-yet-published
+            # browser. start_driver itself still needs early registration.
+            self.browser_was_open = True
         print("🌐 [thread] Attempting to launch a browser...")
         driver = start_driver()
         with self.driver_lock:
@@ -370,7 +379,10 @@ class DownloaderApp(tk.Tk):
                 self.driver = driver
                 self.browser_was_open = True
         if closing:
-            shutdown_driver(driver)
+            def cleanup():
+                if not shutdown_driver(driver):
+                    close_orphan_profile_chrome()
+            start_cleanup(cleanup)
             return
         print("🌐 [thread] Browser is open. Log in to Instagram and navigate to your collection.")
         print("🔑 [thread] Your login cookies will be read automatically when downloading; no export is needed.")
@@ -381,6 +393,7 @@ class DownloaderApp(tk.Tk):
         """Report whether a session was present on the first check or appeared later."""
         logged_in = False
         first_check = True
+        navigation_attempted = False
         print("🔎 Checking Instagram login status...")
         while not self.closing.wait(2):
             if self.driver is not driver:
@@ -407,6 +420,9 @@ class DownloaderApp(tk.Tk):
                     else:
                         print("✅ Instagram session detected after waiting for login. Navigate to your collection and click Scrape Links.")
                     logged_in = True
+                if not navigation_attempted and not self.closing.is_set():
+                    navigation_attempted = True
+                    navigate_to_saved(driver)
             first_check = False
 
     def start_scraping_thread(self):
@@ -433,6 +449,11 @@ class DownloaderApp(tk.Tk):
         print("🔎 [thread] Cookies read, collecting links...")
         links = collect_reel_links(self.driver)
         print(f"🔎 [thread] collect_reel_links returned {len(links)} links")
+        if not links:
+            raise AppError(
+                "No post links were collected. Open your saved collection's "
+                "post grid, wait for thumbnails to load, and retry Scrape Links. "
+                "Your existing saved links were kept.")
         save_links(links)
         print(f"✅ [thread] Scraping complete. {len(links)} links saved.")
         return len(links)
@@ -468,7 +489,7 @@ class DownloaderApp(tk.Tk):
         cookies = read_browser_cookies(self.driver)
         try:
             print("🍪 Using the app browser's Instagram session in memory (no cookies file).")
-            start_download(download_dir, cookies)
+            return start_download(download_dir, cookies)
         finally:
             cookies.clear()
 
@@ -482,53 +503,54 @@ class DownloaderApp(tk.Tk):
             logging.getLogger(name).setLevel(logging.WARNING)
 
     def write_to_debug(self, message):
-        """Append message(s) to the debug log with timestamps and level tags.
-        
-        Filters out HTTP request noise and in-place carriage-return progress
-        ticks. Custom app messages (emoji-prefixed) are promoted and kept.
-        """
+        """Render streamed text without letting progress overwrite older entries."""
         if not message:
             return
         self.debug_area.config(state=tk.NORMAL)
-        for line in message.splitlines(keepends=True):
-            body = line
-            newline = ''
-            if body.endswith('\n'):
-                newline = '\n'
-                body = body[:-1]
-            # Carriage-return progress ticks: overwrite the same visual line.
-            if body.endswith('\r'):
-                body = body[:-1]
-                if body:
-                    self._overwrite_debug_line(body)
-                continue
-            if not body or not body.strip():
-                if newline and self._line_open:
-                    self.debug_area.insert(tk.END, newline)
+        try:
+            # print() writes its text and terminator separately; a carriage return
+            # must apply to the next chunk, even when it arrives on another tick.
+            for body in re.split(r'([\r\n])', message):
+                if body == '\r':
+                    self._debug_replace = True
+                elif body == '\n':
+                    if self._line_open:
+                        self.debug_area.insert(tk.END, '\n')
+                        self._debug_count += 1
                     self._line_open = False
-                    self._debug_count += 1
-                continue
-            # Filter: drop noisy third-party chatter.
-            if self._is_request_noise(body):
-                continue
-            # Keep: app messages (emoji), warnings, errors, completion notes.
-            if not self._line_open:
-                self.debug_area.insert(tk.END, time.strftime("%H:%M:%S ") + "│ ", "timestamp")
-                self._line_open = True
-            self.debug_area.insert(tk.END, body, self._level_tag(body))
-            if newline:
-                self.debug_area.insert(tk.END, newline)
-                self._line_open = False
-                self._debug_count += 1
-        if self._debug_follow or self._debug_at_bottom():
-            self.debug_area.see(tk.END)
-        self.debug_area.config(state=tk.DISABLED)
-        self._update_debug_count()
+                    self._debug_replace = False
+                elif body and not self._is_request_noise(body):
+                    if self.__dict__.get('_debug_replace', False) and self._line_open:
+                        self.debug_area.delete('end-1c linestart', 'end-1c lineend')
+                        self._line_open = False
+                    self._debug_replace = False
+                    if not self._line_open:
+                        self.debug_area.mark_set('debug_line', 'end-1c linestart')
+                        self.debug_area.insert(tk.END, time.strftime("%H:%M:%S ") + "│ ", "timestamp")
+                        self._line_open = True
+                    self.debug_area.insert(tk.END, body, self._level_tag(body))
+            if self._debug_follow or self._debug_at_bottom():
+                self.debug_area.see(tk.END)
+            self._update_debug_count()
+        finally:
+            self.debug_area.config(state=tk.DISABLED)
 
     def _overwrite_debug_line(self, body):
         """Replace the last line's content (for \r progress ticks)."""
-        self.debug_area.delete('debug_line linestart', 'debug_line lineend')
-        self.debug_area.insert('debug_line', body, self._level_tag(body))
+        self.debug_area.delete('end-1c linestart', 'end-1c lineend')
+        self.debug_area.insert(tk.END, body, self._level_tag(body))
+
+    @staticmethod
+    def _level_tag(text: str) -> str:
+        """Choose a configured text tag without depending on a Tk attribute."""
+        lower = text.lower()
+        if any(word in lower for word in ('error', 'failed', 'exception', 'traceback')):
+            return 'error'
+        if any(word in lower for word in ('warning', 'could not', 'no saved')) or '⚠' in text:
+            return 'warning'
+        if any(word in lower for word in ('saved', 'finished', 'complete', 'session detected')) or '✅' in text:
+            return 'success'
+        return ''
 
     @staticmethod
     def _is_request_noise(text):
@@ -590,27 +612,80 @@ class DownloaderApp(tk.Tk):
         self.debug_area.delete("1.0", tk.END)
         self.debug_area.config(state=tk.DISABLED)
         self._line_open = False
+        self._debug_replace = False
         self._debug_count = 0
+        self.debug_area.mark_set('debug_line', '1.0')
         self._update_debug_count()
 
     def check_debug_queue(self):
-        while not self.ui_queue.empty():
-            result, error, on_success = self.ui_queue.get_nowait()
-            self.busy = False
-            self.update_buttons()
-            if error:
-                print(error)
-                messagebox.showerror("Operation Failed", error)
-            else:
-                on_success(result)
-        while not self.debug_queue.empty():
+        """Dispatch bounded batches on Tk's thread, surviving callback failures."""
+        def app_alive() -> bool:
+            if self.closing.is_set():
+                return False
             try:
-                message = self.debug_queue.get_nowait()
-                self.write_to_debug(message)
-            except queue.Empty:
-                pass
+                return bool(self.winfo_exists())
+            except tk.TclError:
+                return False
 
-        self.after(100, self.check_debug_queue)
+        def report_completion_failure() -> None:
+            # Callback exceptions can contain cookies or signed URLs.
+            message = ("Could not display the operation result. Check the download "
+                       "folder and debug log before retrying.")
+            print(message)
+            if app_alive():
+                try:
+                    messagebox.showerror("Completion Error", message)
+                except Exception:
+                    # A failing dialog must not disable future queue processing.
+                    pass
+
+        try:
+            # Independent budgets prevent either continuous producer from starving
+            # the other queue or the rest of Tk's event loop.
+            for _ in range(20):
+                if not app_alive():
+                    return
+                try:
+                    completion = self.ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self.busy = False
+                try:
+                    self.update_buttons()
+                    result, error, on_success = completion
+                    if not app_alive():
+                        return
+                    if error:
+                        print(error)
+                        messagebox.showerror("Operation Failed", error)
+                    else:
+                        on_success(result)
+                except Exception:
+                    report_completion_failure()
+            for _ in range(100):
+                if not app_alive():
+                    return
+                try:
+                    message = self.debug_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self.write_to_debug(message)
+                except Exception:
+                    # stderr is redirected to this same queue. Printing here
+                    # would create an endless error -> render -> error loop.
+                    try:
+                        if sys.__stderr__ is not None:
+                            sys.__stderr__.write("Could not display a debug log entry.\n")
+                    except Exception:
+                        pass
+                    break
+        finally:
+            if app_alive():
+                try:
+                    self.after(100, self.check_debug_queue)
+                except tk.TclError:
+                    pass  # Destruction can occur between the check and scheduling.
 
     class QueueStream:
         def __init__(self, queue):
@@ -624,53 +699,43 @@ class DownloaderApp(tk.Tk):
 
     def on_closing(self):
         """Close the window even when an operation or browser call is stuck."""
-        self.closing.set()
+        from .browser_cleanup import start_cleanup
+
         with self.driver_lock:
+            if self.closing.is_set():
+                return
+            self.closing.set()
             driver, self.driver = self.driver, None
             browser_was_open, self.browser_was_open = self.browser_was_open, False
-        self.destroy()
         def cleanup():
             if driver is not None:
                 if not shutdown_driver(driver):
                     close_orphan_profile_chrome()
             elif browser_was_open:
                 close_orphan_profile_chrome()
-        threading.Thread(target=cleanup, daemon=True).start()
+        # Register the bounded non-daemon owner before root/mainloop disappears.
+        # Only this main-thread caller touches Tk, never the cleanup worker.
+        try:
+            start_cleanup(cleanup)
+        except RuntimeError:
+            print("Could not start browser cleanup worker.")
+        finally:
+            self.destroy()
 
 
 
 def shutdown_driver(driver):
-    """Quit the WebDriver gracefully. Returns True when the session closed."""
-    if driver is None:
-        return False
-    print("🛑 Closing browser...")
-    try:
-        driver.quit()
-        print("🛑 Browser closed.")
-        return True
-    except Exception as error:
-        # Exception text can contain session data; log the category only.
-        print(f"⚠️ Graceful browser close failed ({type(error).__name__}); forcing shutdown.")
-        return False
+    """Quit within a finite budget; False requests owned-profile fallback."""
+    from .browser_cleanup import quit_driver
+
+    return quit_driver(driver)
 
 
 def close_orphan_profile_chrome():
-    """Force-close leftover chrome.exe processes bound to the app's own profile.
+    """Boundedly force only Chrome trees using the exact app profile."""
+    from .browser_cleanup import close_profile_browser
 
-    The dedicated .chrome-profile path is the filter, so only the app's
-    managed browser is ever targeted — never the user's installed Chrome.
-    """
-    profile = CHROME_PROFILE_DIR.replace("'", "''")
-    script = (
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-        f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    )
-    try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                       capture_output=True, timeout=15)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"Could not force-close browser processes ({type(error).__name__}).")
+    return close_profile_browser(CHROME_PROFILE_DIR)
 
 
 def _set_windows_taskbar_identity():
@@ -685,8 +750,15 @@ def _set_windows_taskbar_identity():
         pass
 
 
-def download_summary(result):
+def download_summary(result: dict[str, object]) -> str:
     """Completion message for a download batch, with correct pluralization."""
+    if not isinstance(result, dict):
+        raise ValueError("Invalid download summary.")
+    downloaded, silent_count = result.get('downloaded'), result.get('silent')
+    if (type(downloaded) is not int or type(silent_count) is not int
+            or downloaded < 0 or not 0 <= silent_count <= downloaded
+            or result.get('failed')):
+        raise ValueError("Invalid download summary.")
     videos = "1 video" if result['downloaded'] == 1 else f"{result['downloaded']} videos"
     silent = "1 without audio" if result['silent'] == 1 else f"{result['silent']} without audio"
     return f"Downloaded {videos} ({silent})."
@@ -701,27 +773,15 @@ def scrape_summary(count):
     return f"Saved {count} links. You can now download your videos."
 
 
-def _signal_handler(signum, frame):
-    """Handle Ctrl+C / SIGINT by scheduling a clean shutdown on the main thread."""
-    # Use a global reference or app instance to trigger shutdown
-    # We'll set a flag that the mainloop can check, or just destroy directly
-    # Since we can't easily access the app instance here, we'll use a module-level approach
-    print("🛑 Ctrl+C received, shutting down...")
-    # The app will be created after this, so we need a different approach
-    # We'll set up the handler AFTER creating the app instance
-
-
 def main():
+    from .interrupts import make_interrupt_handler
+
+    try:
+        signal.signal(signal.SIGINT, make_interrupt_handler())
+    except (OSError, ValueError):
+        pass  # Signal registration may be unavailable outside the main thread.
+
     _set_windows_taskbar_identity()
     app = DownloaderApp()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
-
-    def _handle_sigint(signum, frame):
-        print("🛑 Ctrl+C received, shutting down...")
-        app.after(0, app.on_closing)
-
-    try:
-        signal.signal(signal.SIGINT, _handle_sigint)
-    except (OSError, ValueError):
-        pass  # Windows may not support SIGINT in some contexts
     app.mainloop()
