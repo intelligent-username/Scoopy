@@ -286,16 +286,18 @@ class PhotoDownloadTests(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_real_ytdlp_downloads_photo_without_video_processing_or_overwrite(self):
-        self.output.mkdir()
-        (self.output / 'NA_Video by fixture.png').write_bytes(b'existing')
+        photos = self.output / 'photos'
+        photos.mkdir(parents=True)
+        (photos / 'NA_Video by fixture.png').write_bytes(b'existing')
         with patch.object(download.remux, 'validate_video_stream',
                           side_effect=AssertionError('Photo treated as video')):
             result = self.run_local_download(self.IMAGE)
         self.assertEqual(result, {'downloaded': 0, 'silent': 0, 'failed': [], 'photos': 1})
-        files = list(self.output.glob('*.png'))
+        files = list(photos.glob('*.png'))
         self.assertEqual(len(files), 2)
-        self.assertEqual((self.output / 'NA_Video by fixture.png').read_bytes(), b'existing')
+        self.assertEqual((photos / 'NA_Video by fixture.png').read_bytes(), b'existing')
         self.assertIn(self.IMAGE, [path.read_bytes() for path in files])
+        self.assertEqual(list(self.output.glob('*.png')), [])
         self.assertEqual(ui.download_summary(result), 'Downloaded 1 photo.')
         self.assertFalse((self.output / download.WORK_DIR_NAME).exists())
 
@@ -303,6 +305,7 @@ class PhotoDownloadTests(unittest.TestCase):
         with self.assertRaises(session.AppError):
             self.run_local_download(b'<html>verification required</html>')
         self.assertEqual(list(self.output.glob('*.png')), [])
+        self.assertEqual(list((self.output / 'photos').glob('*.png')), [])
         self.assertTrue(list((self.output / 'recovery').rglob('*photo*')) or
                         list((self.output / 'recovery').rglob('*.png')))
 

@@ -150,7 +150,7 @@ class DownloadPipelineTests(unittest.TestCase):
     def test_separate_streams_download_over_http_and_combine(self):
         summary = self.run_download('pipeline-separate')
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
-        published = Path(self.output, 'NA_Pipeline Test.mp4')
+        published = Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4')
         self.assertTrue(published.is_file())
         info = remux.inspect_media(published)
         audio = info['audio']
@@ -163,23 +163,24 @@ class DownloadPipelineTests(unittest.TestCase):
     def test_combined_format_downloads_one_file(self):
         summary = self.run_download('pipeline-combined')
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
-        self.assertTrue(Path(self.output, 'NA_Pipeline Test.mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
         self.assertEqual([path for path in self.recorded_paths() if path != '/missing.m4a'],
                          ['/combined.mp4'])
 
     def test_silent_video_when_no_audio_format_exists(self):
         summary = self.run_download('pipeline-silent')
         self.assertEqual(summary, {'downloaded': 1, 'silent': 1, 'failed': []})
-        self.assertTrue(Path(self.output, 'NA_Pipeline Test.mp4').is_file())
-        self.assertFalse(remux.combined_mp4_has_audio(Path(self.output, 'NA_Pipeline Test.mp4')))
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
+        self.assertFalse(remux.combined_mp4_has_audio(
+            Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4')))
 
     def test_carousel_processes_entries_independently(self):
         summary = self.run_download('pipeline-carousel')
         self.assertEqual(summary['downloaded'], 2)
         self.assertEqual(summary['silent'], 1)
         self.assertEqual(summary['failed'], [])
-        self.assertTrue(Path(self.output, 'NA_Pipeline Test.mp4').is_file())
-        self.assertTrue(Path(self.output, 'NA_Pipeline Test (2).mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test (2).mp4').is_file())
 
     def test_failed_audio_keeps_video_in_recovery_and_reports(self):
         with self.assertRaisesRegex(Exception, '1 download\\(s\\) failed'):
@@ -187,6 +188,8 @@ class DownloadPipelineTests(unittest.TestCase):
         recovered = list(Path(self.output, 'recovery').rglob('*.mp4'))
         self.assertEqual([path.name for path in recovered], ['NA_Pipeline Test.mp4'])
         self.assertFalse(Path(self.output, 'NA_Pipeline Test.mp4').is_file())
+        self.assertFalse(
+            Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
         self.assertIn('/missing.m4a', self.recorded_paths())
 
     def test_extraction_failure_is_recorded_and_batch_continues(self):
@@ -196,7 +199,7 @@ class DownloadPipelineTests(unittest.TestCase):
         self.assertIn('1 download(s) failed', message)
         self.assertIn('https://www.instagram.com/p/pipeline-broken/', message)
         self.assertIn('check Instagram login and rate limits', message)
-        self.assertTrue(Path(self.output, 'NA_Pipeline Test.mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
 
     def test_cookies_are_never_sent_outside_instagram(self):
         from http.cookiejar import Cookie

@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import stat
 from urllib.parse import urlsplit
 
 import yt_dlp
@@ -12,6 +13,11 @@ from .session import AppError, is_instagram_domain
 
 WORK_DIR_NAME = '.scoopy-work'
 RECOVERY_DIR_NAME = 'recovery'
+COMPLETED_VIDEO_DIR_NAME = 'completed_videos'
+PHOTO_DIR_NAME = 'photos'
+_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
+_LEGACY_IMAGE_RE = re.compile(
+    r'(?:[0-9]{8}|NA)_Video by .+\.(?i:jpg|jpeg|png|webp)')
 
 # Only Instagram post links are accepted: /p/<code>, /reel/<code>,
 # /reels/<code>, where <code> is non-empty and contains no '/', '?' or '#'.
@@ -35,7 +41,10 @@ class InstagramIE(_InstagramIE):
     """
 
     def _extract_product_media(self, product_media):
-        if product_media.get('media_type') != 1:
+        if (product_media.get('media_type') != 1
+                or product_media.get('is_video') is True
+                or any(product_media.get(key) for key in
+                       ('video_versions', 'video_dash_manifest', 'video_url'))):
             return super()._extract_product_media(product_media)
         candidates = []
         for image in (product_media.get('image_versions2') or {}).get('candidates') or []:
@@ -329,6 +338,8 @@ def _base_options(out_dir):
         'fixup': 'never',
         'logtostderr': True,
         'cachedir': False,
+        'writethumbnail': False,
+        'write_all_thumbnails': False,
     }
 
 
@@ -370,14 +381,24 @@ def _sanitize_name(name):
 
 
 def _publish(path, download_dir, base_name=None, *, extension='.mp4'):
-    """Move a finished file into download_dir under a unique, non-overwriting name."""
+    """Publish finished media in its protected folder without replacing files."""
+    extension = extension.lower()
+    if extension == '.mp4':
+        directory_name = COMPLETED_VIDEO_DIR_NAME
+    elif extension in _IMAGE_EXTENSIONS:
+        directory_name = PHOTO_DIR_NAME
+    else:
+        raise AppError("Unsupported completed media extension.")
+    destination = _reserved_directory(download_dir, directory_name)
+    os.makedirs(destination, exist_ok=True)
+    destination = _reserved_directory(download_dir, directory_name)
     if base_name is None:
         base_name = os.path.splitext(os.path.basename(path))[0]
     base = _sanitize_name(base_name) or 'media'
-    candidate = os.path.join(download_dir, f'{base}{extension}')
+    candidate = os.path.join(destination, f'{base}{extension}')
     number = 2
     while os.path.lexists(candidate):
-        candidate = os.path.join(download_dir, f'{base} ({number}){extension}')
+        candidate = os.path.join(destination, f'{base} ({number}){extension}')
         number += 1
     shutil.move(path, candidate)
     return candidate
@@ -402,6 +423,116 @@ def _keep_for_recovery(work_dir, download_dir):
         shutil.move(work_dir, destination)
     except OSError:
         pass  # Recovery is best-effort; the batch must continue.
+
+
+def _is_redirected(info: os.stat_result) -> bool:
+    """Recognize both POSIX links and Windows junction/reparse points."""
+    return bool(stat.S_ISLNK(info.st_mode)
+                or getattr(info, 'st_file_attributes', 0)
+                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400))
+
+
+def _safe_download_root(download_dir: str) -> str:
+    """Reject redirected roots and ancestors before any scan, write or cleanup."""
+    if not os.fspath(download_dir).strip():
+        raise AppError("Choose a download folder first.")
+    root = os.path.abspath(download_dir)
+    current = root
+    while True:
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            pass
+        else:
+            if _is_redirected(info):
+                raise AppError("The download folder contains a link. Choose a regular folder.")
+            if not stat.S_ISDIR(info.st_mode):
+                raise AppError("The download path is not a folder.")
+        parent = os.path.dirname(current)
+        if parent == current:
+            return root
+        current = parent
+
+
+def _reserved_directory(download_dir: str, directory_name: str) -> str:
+    """Resolve one reserved child without following a linked destination."""
+    path = os.path.join(_safe_download_root(download_dir), directory_name)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return path
+    if _is_redirected(info):
+        raise AppError(f"The {directory_name} folder is a link. Use a regular folder.")
+    if not stat.S_ISDIR(info.st_mode):
+        raise AppError(f"The {directory_name} path is not a folder.")
+    return path
+
+
+def _recovery_directory(download_dir: str) -> str:
+    """Resolve only the reserved recovery child, rejecting redirected roots."""
+    return _reserved_directory(download_dir, RECOVERY_DIR_NAME)
+
+
+def _is_legacy_image(path: str, root: str) -> bool:
+    """Check a captured absolute path's scope and current nonredirected file type."""
+    if (not os.path.isabs(path) or os.path.dirname(path) != root
+            or not _LEGACY_IMAGE_RE.fullmatch(os.path.basename(path))):
+        return False
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(info.st_mode) and not _is_redirected(info)
+
+
+def legacy_image_candidates(download_dir: str) -> list[str]:
+    """List safe old app-named loose images; filenames do not prove failure."""
+    try:
+        root = _safe_download_root(download_dir)
+    except AppError:
+        return []
+    try:
+        with os.scandir(root) as entries:
+            return sorted(entry.path for entry in entries
+                          if _is_legacy_image(entry.path, root))
+    except FileNotFoundError:
+        return []
+
+
+def has_failed_media(download_dir: str) -> bool:
+    """Return whether recovery or confirmable legacy loose images are present."""
+    try:
+        path = _recovery_directory(download_dir)
+        with os.scandir(path) as entries:
+            if next(entries, None) is not None:
+                return True
+    except (OSError, AppError):
+        pass
+    try:
+        return bool(legacy_image_candidates(download_dir))
+    except OSError:
+        return False
+
+
+def remove_failed_media(download_dir: str, *, loose_images: tuple[str, ...] = ()) -> None:
+    """Remove recovery and only explicitly captured, still-safe legacy images."""
+    try:
+        path = _recovery_directory(download_dir)
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        for image in loose_images:
+            root = _safe_download_root(download_dir)
+            if _is_legacy_image(image, root):
+                try:
+                    os.unlink(image)
+                except FileNotFoundError:
+                    pass
+    except OSError as error:
+        raise AppError(
+            "Could not remove all failed media. Close files open in other apps, "
+            "check folder permissions, and try again.") from error
 
 
 def _safe_reason(error):

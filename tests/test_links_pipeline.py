@@ -185,7 +185,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                              self.fake_process({'both1': combined_file})):
             summary = download.start_download(self.output, [], str(self.links))
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
-        self.assertTrue(Path(self.output, 'NA_Test Video.mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Test Video.mp4').is_file())
         output = self.stdout.getvalue()
         self.assertIn('duplicate of an earlier link', output)
         self.assertIn('Dropped 2 of 3', output)

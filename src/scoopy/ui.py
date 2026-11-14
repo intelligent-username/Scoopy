@@ -12,8 +12,9 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from selenium.common.exceptions import WebDriverException
 
+from . import download as media_download
 from .browser import start_driver, collect_reel_links, save_links
-from .download import start_download
+from .download import RECOVERY_DIR_NAME, has_failed_media, remove_failed_media, start_download
 from .paths import BASE_DIR, CHROME_PROFILE_DIR, LINKS_FILE
 from .session import AppError, navigate_to_saved, read_browser_cookies
 
@@ -69,7 +70,9 @@ class DownloaderApp(tk.Tk):
         self.setup_ui()
         self.configure_styles()
         self.redirect_stdout()
+        self.update_buttons()
         self.check_debug_queue()
+        self.check_recovery_folder()
 
     def setup_ui(self):
         """Initializes and lays out all UI components."""
@@ -94,7 +97,7 @@ class DownloaderApp(tk.Tk):
         self.folder_entry.pack(fill=tk.X, ipady=3)
 
         # Live helper line under the entry so users always see exactly where
-        # videos land without having to interpret relative paths.
+        # media lands without having to interpret relative paths.
         self.folder_path_label = ttk.Label(folder_frame, text="", style="Muted.TLabel")
         self.folder_path_label.pack(anchor=tk.W, pady=(4, 0))
         self.folder_name_var.trace_add('write', lambda *_: self._update_folder_path())
@@ -128,6 +131,11 @@ class DownloaderApp(tk.Tk):
         self.view_button = ttk.Button(view_frame, text="Open Download Folder",
                                       command=self.view_videos, style="Secondary.TButton")
         self.view_button.pack(fill=tk.X, ipady=5)
+
+        self.remove_failed_button = ttk.Button(
+            view_frame, text="Remove failed media",
+            command=self.remove_failed_media_thread, style="Secondary.TButton")
+        # Packed only when recovery or legacy loose-image candidates exist.
 
         debug_frame = ttk.Labelframe(main_frame, text="Logs", padding=12)
         debug_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
@@ -282,6 +290,8 @@ class DownloaderApp(tk.Tk):
         self.download_hint.config(
             text="" if links_ready or self.busy
             else "Run scraping first — no links collected yet")
+        if self.__dict__.get('remove_failed_button') is not None:
+            self._refresh_recovery_button()
 
     def start_operation(self, target, on_success):
         if self.busy:
@@ -323,9 +333,98 @@ class DownloaderApp(tk.Tk):
         """Keep the helper line under the folder entry in sync while typing."""
         name = self.folder_name_var.get().strip()
         if name:
-            self.folder_path_label.config(text=f"Saves to:  {os.path.join(BASE_DIR, name)}")
+            self.folder_path_label.config(
+                text=f"Saves to:  {os.path.join(BASE_DIR, name)}\n"
+                "New downloads: videos in completed_videos/; photos in photos/.")
         else:
             self.folder_path_label.config(text="Enter a folder name above.")
+        if self.__dict__.get('remove_failed_button') is not None:
+            self._refresh_recovery_button()
+
+    def _refresh_recovery_button(self):
+        """Show cleanup only for failed media in the selected download folder."""
+        name = self.folder_name_var.get().strip()
+        nonempty = bool(name) and has_failed_media(os.path.join(BASE_DIR, name))
+        if nonempty:
+            if not self.remove_failed_button.winfo_manager():
+                self.remove_failed_button.pack(fill=tk.X, ipady=5, pady=(8, 0))
+            self.remove_failed_button.config(state=tk.DISABLED if self.busy else tk.NORMAL)
+        else:
+            self.remove_failed_button.pack_forget()
+
+    def check_recovery_folder(self):
+        """Notice recovery and top-level legacy-image changes."""
+        if self.closing.is_set():
+            return
+        try:
+            self._refresh_recovery_button()
+            self.after(1000, self.check_recovery_folder)
+        except tk.TclError:
+            pass  # The window may have been destroyed since the closing check.
+
+    def remove_failed_media_thread(self):
+        """Confirm recovery cleanup and an explicit snapshot of loose images."""
+        if self.busy or self.closing.is_set():
+            return
+        name = self.folder_name_var.get().strip()
+        if not name:
+            return
+        # Capture the selected path before the dialog/worker; edits to the folder
+        # field during cleanup must not change what was approved for deletion.
+        download_dir = os.path.abspath(os.path.join(BASE_DIR, name))
+        try:
+            snapshot = tuple(media_download.legacy_image_candidates(download_dir))
+            cleanup_available = has_failed_media(download_dir)
+        except (OSError, AppError):
+            messagebox.showerror(
+                "Could Not Check Cleanup",
+                "Could not check this folder. Check folder permissions and try again.",
+                parent=self)
+            return
+        if not cleanup_available and not snapshot:
+            self._refresh_recovery_button()
+            return
+        recovery = os.path.join(download_dir, RECOVERY_DIR_NAME)
+        prompt = (f"Permanently delete recovery media in (if present):\n\n{recovery}\n")
+        if snapshot:
+            filenames = [repr(os.path.basename(path)) for path in snapshot[:10]]
+            listing = '\n'.join(
+                filename if len(filename) <= 100 else filename[:97] + '...'
+                for filename in filenames)
+            prompt += (
+                f"\nAlso delete {len(snapshot)} legacy loose image(s) directly in:\n"
+                f"{download_dir}\n\n"
+                "WARNING: These loose images MAY include legitimate photos, "
+                "not just bad thumbnails or frames. Review before deleting:\n\n"
+                f"{listing}\n")
+            if len(snapshot) > 10:
+                prompt += f"... and {len(snapshot) - 10} more (not shown).\n"
+            prompt += "\nChoose No to keep these images or inspect them in the download folder.\n"
+        prompt += (
+            "\nThe completed_videos/ and photos/ folders and MP4 files outside "
+            "recovery will not be removed.")
+        if not messagebox.askyesno(
+                "Remove failed media?", prompt,
+                parent=self, default=messagebox.NO):
+            return
+        # Tk dialogs run a nested event loop: another operation or shutdown may
+        # have started while confirmation was open.
+        if self.busy or self.closing.is_set():
+            return
+
+        def cleanup():
+            try:
+                remove_failed_media(download_dir, loose_images=snapshot)
+            except OSError:
+                raise AppError(
+                    "Cleanup could not finish. Some files may already be removed. "
+                    "Check folder permissions and remaining files before retrying.") from None
+
+        self.start_operation(
+            cleanup,
+            lambda _: print(
+                "Cleanup finished for the confirmed folder and loose-image selection. "
+                "The completed_videos/ and photos/ folders were kept."))
 
     def view_videos(self):
         """Open the download folder from section 1 in the file explorer."""
@@ -337,8 +436,8 @@ class DownloaderApp(tk.Tk):
         if not os.path.isdir(path):
             messagebox.showinfo(
                 "Nothing Here Yet",
-                f"'{name}' does not exist yet.\n\nDownload some videos first — "
-                "photos and videos will be saved to this folder.")
+                f"'{name}' does not exist yet.\n\nDownload a collection first. "
+                "New videos go in completed_videos/ and photos in photos/ inside this folder.")
             return
         try:
             if platform.system() == 'Windows':

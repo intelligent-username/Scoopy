@@ -211,7 +211,10 @@ class DownloadTests(unittest.TestCase):
         # silent video with a clear status.
         self.assertEqual(summary, {'downloaded': 1, 'silent': 1, 'failed': []})
         self.assertEqual(sorted(path.name for path in Path(self.output).iterdir()),
-                         ['NA_Test Video.mp4'])
+                         ['completed_videos'])
+        self.assertEqual(sorted(path.name for path in
+                                Path(self.output, 'completed_videos').iterdir()),
+                          ['NA_Test Video.mp4'])
 
     def test_combined_download_publishes_verified_file(self):
         combined_file = self.finish_file('NA_Test Video.mp4', self.fixtures / 'combined.mp4')
@@ -223,7 +226,7 @@ class DownloadTests(unittest.TestCase):
                 patch.object(download.yt_dlp.YoutubeDL, 'process_ie_result',
                              self.fake_process({'both1': combined_file})):
             summary = download.start_download(self.output, self.cookies, str(self.links))
-        published = Path(self.output, 'NA_Test Video.mp4')
+        published = Path(self.output, 'completed_videos', 'NA_Test Video.mp4')
         self.assertTrue(published.is_file())
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
         self.assertNotIn('recovery', [path.name for path in Path(self.output).iterdir()])
@@ -240,7 +243,7 @@ class DownloadTests(unittest.TestCase):
                              self.fake_process({'vid1': video_file, 'aud1': audio_file})):
             summary = download.start_download(self.output, self.cookies, str(self.links))
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
-        published = Path(self.output, 'NA_Test Video.mp4')
+        published = Path(self.output, 'completed_videos', 'NA_Test Video.mp4')
         self.assertTrue(published.is_file())
         info = remux.inspect_media(published)
         audio = info['audio']
@@ -258,7 +261,7 @@ class DownloadTests(unittest.TestCase):
                              self.fake_process({'vid1': video_file})):
             summary = download.start_download(self.output, self.cookies, str(self.links))
         self.assertEqual(summary, {'downloaded': 1, 'silent': 1, 'failed': []})
-        self.assertTrue(Path(self.output, 'NA_Test Video.mp4').is_file())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Test Video.mp4').is_file())
 
     def test_publish_never_overwrites_existing_outputs(self):
         def mock_extract(ydl, url, download):
@@ -273,9 +276,9 @@ class DownloadTests(unittest.TestCase):
 
         run_once()
         run_once()
-        self.assertEqual(Path(self.output, 'NA_Test Video.mp4').read_bytes(),
-                         (self.fixtures / 'combined.mp4').read_bytes())
-        self.assertTrue(Path(self.output, 'NA_Test Video (2).mp4').is_file())
+        self.assertEqual(Path(self.output, 'completed_videos', 'NA_Test Video.mp4').read_bytes(),
+                          (self.fixtures / 'combined.mp4').read_bytes())
+        self.assertTrue(Path(self.output, 'completed_videos', 'NA_Test Video (2).mp4').is_file())
 
     def test_failed_merge_keeps_components_in_recovery(self):
         video_file = self.finish_file('NA_Test Video.mp4', self.fixtures / 'video-only.mp4')
