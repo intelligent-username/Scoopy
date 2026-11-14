@@ -131,10 +131,10 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
     if summary['failed']:
         details = '\n'.join(f"- {item}" for item in summary['failed'])
         raise AppError(
-            f"{len(summary['failed'])} download(s) failed. Their downloaded media was kept in the "
+            f"{len(summary['failed'])} download(s) failed. Any downloaded components are in the "
             f"'{RECOVERY_DIR_NAME}' folder inside the download folder. See the debug log:\n{details}\n"
-            "If Instagram requires login, log in again in the app's browser and retry. "
-            "Private posts also require access from that account; Instagram may rate-limit downloads.")
+            "Format or container failures are not necessarily login problems. "
+            "If Instagram reports an access error, check login, post permissions and rate limits.")
 
     print("✅ Download process finished.")
     return summary
@@ -230,7 +230,8 @@ def _process_entry(entry, download_dir, work_root, cookies, summary, index):
         reason = _safe_reason(error)
         _keep_for_recovery(work_dir, download_dir)
         summary['failed'].append(f"Post {entry_id}: {reason}")
-        print(f"⚠️ Post {entry_id} failed: {reason} Downloaded media was kept in '{RECOVERY_DIR_NAME}/'.")
+        print(f"⚠️ Post {entry_id} failed: {reason} "
+              f"Any downloaded components were kept in '{RECOVERY_DIR_NAME}/'.")
         return
     if entry.get('_scoopy_photo'):
         summary['photos'] = summary.get('photos', 0) + 1
@@ -263,15 +264,17 @@ def _download_entry(entry, download_dir, work_dir, cookies, index):
 
     if combined is not None:
         path = _single_file(_download_formats(entry, combined['format_id'], work_dir, cookies))
-        remux.validate_video_stream(path)
-        has_audio = _readable_audio(remux.inspect_media(path))
-        return _publish(path, download_dir), not has_audio
-
-    if video is None:
-        raise remux.RemuxError("No downloadable MP4 video format was found for this post.")
-
-    video_path = _single_file(_download_formats(entry, video['format_id'], work_dir, cookies))
-    remux.validate_video_stream(video_path)
+        info = remux.validate_video_stream(path)
+        if _readable_audio(info):
+            return _publish(path, download_dir), False
+        video_path = path
+    else:
+        if video is None:
+            raise remux.RemuxError(
+                "No compatible MP4 format was found. The post may expose only "
+                "unsupported codecs or fragmented streams.")
+        video_path = _single_file(_download_formats(entry, video['format_id'], work_dir, cookies))
+        remux.validate_video_stream(video_path)
 
     if audio is None:
         # No audio format exists, but missing format metadata is not proof of
@@ -279,7 +282,8 @@ def _download_entry(entry, download_dir, work_dir, cookies, index):
         has_audio = _readable_audio(remux.inspect_media(video_path))
         return _publish(video_path, download_dir), not has_audio
 
-    audio_path = _single_file(_download_formats(entry, audio['format_id'], work_dir, cookies))
+    audio_path = _single_file(_download_formats(
+        entry, audio['format_id'], os.path.join(work_dir, 'audio'), cookies))
     remux.validate_audio_stream(audio_path)
     combined_path = os.path.join(work_dir, f'scoopy-combined-{index}.mp4')
     remux.remux_to_mp4(video_path, audio_path, combined_path)
@@ -296,22 +300,38 @@ def _readable_audio(info):
 def _select_formats(formats):
     """Choose formats without ever selecting an arbitrary '/best' fallback.
 
-    Returns (combined, video, audio) format dicts, best-first per role.
+    Direct MP4 metadata can omit codecs. Inspect those files instead of rejecting
+    them or preferring DASH fragments that the native muxer cannot process.
     """
     combined = _best(formats, lambda f: f.get('ext') == 'mp4'
-                     and _is_video_codec(f) and _is_aac(f))
-    video = _best(formats, lambda f: f.get('ext') == 'mp4' and _is_video_codec(f)
-                  and f.get('acodec') == 'none')
-    audio = _best(formats, lambda f: f.get('ext') in ('m4a', 'mp4') and _is_aac(f)
-                  and f.get('vcodec') == 'none')
+                      and ((_is_video_codec(f) and _is_aac(f))
+                           or (_is_progressive(f)
+                               and (not f.get('vcodec') or _is_video_codec(f))
+                               and (not f.get('acodec') or _is_aac(f)))))
+    video = _best(formats, lambda f: f.get('ext') == 'mp4'
+                   and (_is_video_codec(f) or (_is_progressive(f) and not f.get('vcodec')))
+                   and f.get('acodec') == 'none')
+    audio = _best(formats, lambda f: f.get('ext') in ('m4a', 'mp4')
+                   and (_is_aac(f) or (_is_progressive(f) and not f.get('acodec')))
+                   and f.get('vcodec') == 'none')
     return combined, video, audio
 
 
 def _best(formats, matches):
-    """yt-dlp lists formats best-first; prefer H.264 video and native protocols."""
-    candidates = [f for f in formats if matches(f) and not _needs_external_tool(f)]
-    candidates.sort(key=lambda f: 0 if str(f.get('vcodec', '')).startswith('avc') else 1)
+    """yt-dlp sorts worst-to-best; prefer progressive files, then known H.264."""
+    candidates = [f for f in reversed(formats)
+                  if matches(f) and not _needs_external_tool(f) and not f.get('has_drm')]
+    candidates.sort(key=lambda f: (
+        not _is_progressive(f),
+        not str(f.get('vcodec', '')).startswith('avc')))
     return candidates[0] if candidates else None
+
+
+def _is_progressive(fmt):
+    """Identify direct HTTP files, not DASH/HLS manifests or fragment lists."""
+    return (fmt.get('protocol') in ('http', 'https')
+            and not fmt.get('fragments') and not fmt.get('manifest_url')
+            and not str(fmt.get('format_id', '')).lower().startswith(('dash', 'hls')))
 
 
 def _is_video_codec(fmt):
@@ -362,7 +382,11 @@ def _download_formats(entry, format_id, work_dir, cookies):
         # Drop the stale selection from the inspection pass so the new
         # format choice is honored on download.
         clean_entry = {key: value for key, value in entry.items()
-                       if key not in ('requested_formats', 'format')}
+                       if key not in ('requested_formats', 'requested_downloads', 'format')}
+        if clean_entry.get('formats'):
+            for key in ('url', 'format_id', 'ext', 'protocol', 'vcodec', 'acodec',
+                        'fragments', 'fragment_base_url', 'manifest_url'):
+                clean_entry.pop(key, None)
         ydl.process_ie_result(clean_entry, download=True)
     return [path for path in files if os.path.isfile(path)]
 

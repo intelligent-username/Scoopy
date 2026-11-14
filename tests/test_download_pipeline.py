@@ -66,6 +66,12 @@ class FakeInstagramIE(InfoExtractor):
 
         if post_id == 'pipeline-combined':
             return entry('', combined)
+        if post_id == 'pipeline-progressive':
+            # Real Instagram direct files often omit codec labels, while a DASH
+            # variant has explicit labels. The native muxer needs the direct file.
+            direct = dict(combined, format_id='direct', vcodec=None, acodec=None)
+            dash = dict(video, format_id='dash-video')
+            return entry('', direct, dash, audio)
         if post_id == 'pipeline-separate':
             return entry('', video, audio)
         if post_id == 'pipeline-silent':
@@ -165,7 +171,14 @@ class DownloadPipelineTests(unittest.TestCase):
         self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
         self.assertTrue(Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4').is_file())
         self.assertEqual([path for path in self.recorded_paths() if path != '/missing.m4a'],
-                         ['/combined.mp4'])
+                          ['/combined.mp4'])
+
+    def test_direct_mp4_without_codec_labels_wins_over_dash_and_keeps_audio(self):
+        summary = self.run_download('pipeline-progressive')
+        self.assertEqual(summary, {'downloaded': 1, 'silent': 0, 'failed': []})
+        published = Path(self.output, 'completed_videos', 'NA_Pipeline Test.mp4')
+        self.assertTrue(remux.combined_mp4_has_audio(published))
+        self.assertEqual(self.recorded_paths(), ['/combined.mp4'])
 
     def test_silent_video_when_no_audio_format_exists(self):
         summary = self.run_download('pipeline-silent')

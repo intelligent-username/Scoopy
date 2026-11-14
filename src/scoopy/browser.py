@@ -203,6 +203,7 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
     seen = set()
     no_new_rounds = 0
     last_count = 0
+    bottom_checks = 0
 
     for _ in range(MAX_SCROLL_ROUNDS):
         if time.monotonic() >= deadline:
@@ -226,7 +227,14 @@ def collect_reel_links(driver: webdriver.Remote) -> list[str]:
 
         if no_new_rounds >= MAX_NO_NEW_ROUNDS:
             break
-        driver.execute_script(SCROLL_SCRIPT, supported_hrefs)
+        moved = driver.execute_script(SCROLL_SCRIPT, supported_hrefs)
+        if moved is False and no_new_rounds:
+            bottom_checks += 1
+            if bottom_checks >= 2:
+                print("✅ Reached the bottom; no additional post links appeared.")
+                break
+        else:
+            bottom_checks = 0
         time.sleep(min(SCROLL_PAUSE, max(0, deadline - time.monotonic())))
     else:
         print("⚠️ Collection scroll limit reached; results may be incomplete.")
