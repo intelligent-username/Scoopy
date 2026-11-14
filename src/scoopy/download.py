@@ -4,6 +4,7 @@ import shutil
 from urllib.parse import urlsplit
 
 import yt_dlp
+from yt_dlp.extractor.instagram import InstagramIE as _InstagramIE
 
 from . import remux
 from .paths import LINKS_FILE
@@ -25,9 +26,52 @@ _INVISIBLE_TABLE = str.maketrans('', '', '\ufeff\u200b\u200c\u200d\u2060')
 _EXTERNAL_TOOL_PROTOCOLS = ('rtmp', 'rtmpe', 'rtmps', 'rtmpt', 'rtmpte', 'rtmpts', 'mms', 'f4m')
 
 
+class InstagramIE(_InstagramIE):
+    """Retain confirmed product photos that the video extractor omits.
+
+    This small adapter deliberately uses the same extractor key to replace the
+    built-in Instagram extractor. Only explicit media_type=1 qualifies; video
+    thumbnails must never become photo downloads.
+    """
+
+    def _extract_product_media(self, product_media):
+        if product_media.get('media_type') != 1:
+            return super()._extract_product_media(product_media)
+        candidates = []
+        for image in (product_media.get('image_versions2') or {}).get('candidates') or []:
+            try:
+                parsed = urlsplit(image.get('url') or '')
+                host = parsed.hostname or ''
+                if (parsed.scheme != 'https' or parsed.username is not None
+                        or parsed.password is not None or parsed.port is not None
+                        or not any(host == domain or host.endswith('.' + domain)
+                                   for domain in ('instagram.com', 'cdninstagram.com', 'fbcdn.net'))):
+                    continue
+            except (AttributeError, ValueError):
+                continue
+            candidates.append(image)
+        if not candidates:
+            raise yt_dlp.utils.ExtractorError(
+                "Instagram did not provide a supported photo URL.", expected=True)
+        image = max(candidates, key=lambda item:
+                    (item.get('width') or 0) * (item.get('height') or 0))
+        extension = os.path.splitext(urlsplit(image['url']).path)[1].lower().lstrip('.')
+        return {
+            'id': str(product_media.get('code') or product_media.get('pk') or 'photo'),
+            '_scoopy_photo': True,
+            'formats': [{
+                'format_id': 'scoopy-photo', 'url': image['url'],
+                'ext': extension if extension in ('jpg', 'jpeg', 'png', 'webp') else 'jpg',
+                'vcodec': 'images', 'acodec': 'none',
+                'width': image.get('width'), 'height': image.get('height'),
+                'http_headers': {'Referer': 'https://www.instagram.com/'},
+            }],
+        }
+
+
 def start_download(download_dir, cookies, links_file=LINKS_FILE):
     """
-    Downloads each linked post, preferring a verified combined MP4. Separate
+    Downloads photos and videos from each linked post. Prefers a verified combined MP4. Separate
     video/audio streams are combined with pymp4v2 (no FFmpeg). Videos without
     an audio track are saved and reported as silent. Failed media is kept in
     a recovery folder and the batch continues.
@@ -72,6 +116,8 @@ def start_download(download_dir, cookies, links_file=LINKS_FILE):
         shutil.rmtree(work_root, ignore_errors=True)
 
     print(f"📥 Downloaded {summary['downloaded']} videos ({summary['silent']} without audio).")
+    if summary.get('photos'):
+        print(f"Downloaded {summary['photos']} photos.")
 
     if summary['failed']:
         details = '\n'.join(f"- {item}" for item in summary['failed'])
@@ -154,6 +200,7 @@ def _validate_post_url(raw):
 
 def _process_url(url, download_dir, work_root, cookies, summary, counter):
     with yt_dlp.YoutubeDL(_base_options(work_root)) as ydl:
+        ydl.add_info_extractor(InstagramIE())
         for cookie in cookies:
             ydl.cookiejar.set_cookie(cookie)
         info = ydl.extract_info(url, download=False)
@@ -176,6 +223,10 @@ def _process_entry(entry, download_dir, work_root, cookies, summary, index):
         summary['failed'].append(f"Post {entry_id}: {reason}")
         print(f"⚠️ Post {entry_id} failed: {reason} Downloaded media was kept in '{RECOVERY_DIR_NAME}/'.")
         return
+    if entry.get('_scoopy_photo'):
+        summary['photos'] = summary.get('photos', 0) + 1
+        print(f"Saved photo: {os.path.basename(path)}")
+        return
     summary['downloaded'] += 1
     if silent:
         summary['silent'] += 1
@@ -186,6 +237,19 @@ def _process_entry(entry, download_dir, work_root, cookies, summary, index):
 
 def _download_entry(entry, download_dir, work_dir, cookies, index):
     """Download one post entry and return (published_path, silent)."""
+    if entry.get('_scoopy_photo'):
+        path = _single_file(_download_formats(entry, 'scoopy-photo', work_dir, cookies))
+        with open(path, 'rb') as image:
+            header = image.read(16)
+        if header.startswith(b'\xff\xd8\xff'):
+            extension = '.jpg'
+        elif header.startswith(b'\x89PNG\r\n\x1a\n'):
+            extension = '.png'
+        elif header.startswith(b'RIFF') and header[8:12] == b'WEBP':
+            extension = '.webp'
+        else:
+            raise remux.RemuxError("The downloaded photo is not a supported image file.")
+        return _publish(path, download_dir, extension=extension), False
     combined, video, audio = _select_formats(entry.get('formats') or [])
 
     if combined is not None:
@@ -305,15 +369,15 @@ def _sanitize_name(name):
     return cleaned.strip().strip('.')[:150]
 
 
-def _publish(path, download_dir, base_name=None):
+def _publish(path, download_dir, base_name=None, *, extension='.mp4'):
     """Move a finished file into download_dir under a unique, non-overwriting name."""
     if base_name is None:
         base_name = os.path.splitext(os.path.basename(path))[0]
-    base = _sanitize_name(base_name) or 'video'
-    candidate = os.path.join(download_dir, f'{base}.mp4')
+    base = _sanitize_name(base_name) or 'media'
+    candidate = os.path.join(download_dir, f'{base}{extension}')
     number = 2
     while os.path.lexists(candidate):
-        candidate = os.path.join(download_dir, f'{base} ({number}).mp4')
+        candidate = os.path.join(download_dir, f'{base} ({number}){extension}')
         number += 1
     shutil.move(path, candidate)
     return candidate
