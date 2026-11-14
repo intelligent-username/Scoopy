@@ -173,6 +173,7 @@ class DownloaderApp(tk.Tk):
                              lambda event: setattr(self, "_debug_follow", self._debug_at_bottom()))
         self.debug_area.bind("<MouseWheel>", self._on_debug_wheel)
         self._line_open = False
+        self._debug_replace = False
         self._debug_count = 0
         # In-place overwrite mark for carriage-return progress ticks.
         self.debug_area.mark_set('debug_line', '1.0')
@@ -337,7 +338,7 @@ class DownloaderApp(tk.Tk):
             messagebox.showinfo(
                 "Nothing Here Yet",
                 f"'{name}' does not exist yet.\n\nDownload some videos first — "
-                "they will be saved to this folder.")
+                "photos and videos will be saved to this folder.")
             return
         try:
             if platform.system() == 'Windows':
@@ -520,7 +521,7 @@ class DownloaderApp(tk.Tk):
                     self._line_open = False
                     self._debug_replace = False
                 elif body and not self._is_request_noise(body):
-                    if self.__dict__.get('_debug_replace', False) and self._line_open:
+                    if self._debug_replace and self._line_open:
                         self.debug_area.delete('end-1c linestart', 'end-1c lineend')
                         self._line_open = False
                     self._debug_replace = False
@@ -755,12 +756,19 @@ def download_summary(result: dict[str, object]) -> str:
     if not isinstance(result, dict):
         raise ValueError("Invalid download summary.")
     downloaded, silent_count = result.get('downloaded'), result.get('silent')
+    photo_count = result.get('photos', 0)
     if (type(downloaded) is not int or type(silent_count) is not int
+            or type(photo_count) is not int or photo_count < 0
             or downloaded < 0 or not 0 <= silent_count <= downloaded
             or result.get('failed')):
         raise ValueError("Invalid download summary.")
     videos = "1 video" if result['downloaded'] == 1 else f"{result['downloaded']} videos"
     silent = "1 without audio" if result['silent'] == 1 else f"{result['silent']} without audio"
+    if photo_count:
+        photos = "1 photo" if photo_count == 1 else f"{photo_count} photos"
+        if downloaded == 0:
+            return f"Downloaded {photos}."
+        return f"Downloaded {photos} and {videos} ({silent})."
     return f"Downloaded {videos} ({silent})."
 
 
@@ -769,8 +777,8 @@ def scrape_summary(count):
     if count == 0:
         return "Saved 0 links. Did something go wrong?"
     if count == 1:
-        return "Saved 1 link. You can now download your videos."
-    return f"Saved {count} links. You can now download your videos."
+        return "Saved 1 link. You can now download your photos and videos."
+    return f"Saved {count} links. You can now download your photos and videos."
 
 
 def main():
