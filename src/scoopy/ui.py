@@ -24,7 +24,7 @@ APP_ICON_ICO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets'
 # --- Constants ---
 APP_TITLE = "Scoopy"
 WINDOW_WIDTH = 760
-WINDOW_HEIGHT = 720
+WINDOW_HEIGHT = 760
 
 # --- COLOR PALETTE ---
 # Built from the brand green #4CAF50 (hue ~122) with the color-palette skill:
@@ -52,6 +52,9 @@ DEBUG_TIMESTAMP_FG = "#95A69B"
 DEBUG_ERROR_FG = "#FF8C84"
 DEBUG_SUCCESS_FG = "#8BDC96"
 DEBUG_WARNING_FG = "#E9BC66"
+
+# Producers keep their diagnostic messages; the desktop log omits emoji chrome.
+LOG_DECORATION = str.maketrans('', '', '🚀🌐🔑🔎✅⚠🔗💾🍪📄📥📁📂🔄🛑📦🗂\ufe0f')
 
 
 # --- Main GUI Application Class ---
@@ -82,19 +85,26 @@ class DownloaderApp(tk.Tk):
         self.resizable(True, True)
         # Default size is the floor: users can grow the window freely,
         # but never below the layout's intended proportions.
-        self.minsize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.minsize(WINDOW_WIDTH, 720)
         self._apply_window_icon()
 
-        main_frame = ttk.Frame(self, padding=20)
+        main_frame = ttk.Frame(self, padding=24)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        folder_frame = ttk.Labelframe(main_frame, text="1. Download Folder", padding=12)
+        heading = ttk.Frame(main_frame)
+        heading.pack(fill=tk.X, pady=(0, 16))
+        ttk.Label(heading, text="Scoopy", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            heading, text="Instagram collections, saved locally",
+            style="Muted.TLabel").pack(anchor=tk.W, pady=(4, 0))
+
+        folder_frame = ttk.Labelframe(main_frame, text="1. Save to", padding=12)
         folder_frame.pack(fill=tk.X, pady=(0, 16))
 
         self.folder_name_var = tk.StringVar(value="videos")
         self.folder_entry = ttk.Entry(folder_frame, textvariable=self.folder_name_var,
                                       font=("Segoe UI", 10))
-        self.folder_entry.pack(fill=tk.X, ipady=3)
+        self.folder_entry.pack(fill=tk.X, ipady=4)
 
         # Live helper line under the entry so users always see exactly where
         # media lands without having to interpret relative paths.
@@ -103,41 +113,44 @@ class DownloaderApp(tk.Tk):
         self.folder_name_var.trace_add('write', lambda *_: self._update_folder_path())
         self._update_folder_path()
 
-        scraping_frame = ttk.Labelframe(main_frame, text="2. Download Photos and Videos", padding=12)
-        scraping_frame.pack(fill=tk.X, pady=16)
+        scraping_frame = ttk.Labelframe(main_frame, text="2. Collect and download", padding=12)
+        scraping_frame.pack(fill=tk.X, pady=(0, 16))
 
-        self.browser_button = ttk.Button(scraping_frame, text="Open Browser",
-                                         command=self.start_browser_thread, style="Secondary.TButton")
-        self.browser_button.pack(fill=tk.X, ipady=5)
+        browser_actions = ttk.Frame(scraping_frame)
+        browser_actions.pack(fill=tk.X)
+        browser_actions.columnconfigure((0, 1), weight=1, uniform="browser-actions")
+        self.browser_button = ttk.Button(browser_actions, text="Open browser",
+                                          command=self.start_browser_thread, style="Secondary.TButton")
+        self.browser_button.grid(row=0, column=0, sticky="ew")
 
-        self.scrape_button = ttk.Button(scraping_frame, text="Scrape Links",
-                                        command=self.start_scraping_thread, state=tk.DISABLED)
-        self.scrape_button.pack(fill=tk.X, ipady=5, pady=(8, 0))
+        self.scrape_button = ttk.Button(browser_actions, text="Collect links",
+                                         command=self.start_scraping_thread, state=tk.DISABLED)
+        self.scrape_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # Same workflow as scraping: log in -> scrape -> download, so the
         # download action lives in this section instead of its own box.
-        self.download_button = ttk.Button(scraping_frame, text="Download Collection",
-                                          command=self.start_download_thread, style="Primary.TButton")
-        self.download_button.pack(fill=tk.X, ipady=10, pady=(12, 0))
+        self.download_button = ttk.Button(scraping_frame, text="Download collection",
+                                           command=self.start_download_thread, style="Primary.TButton")
+        self.download_button.pack(fill=tk.X, pady=(12, 0))
 
         # Inline empty-state hint, toggled by update_buttons() when links.txt
         # is missing or empty so the disabled download button explains itself.
         self.download_hint = ttk.Label(scraping_frame, text="", style="Hint.TLabel")
         self.download_hint.pack(fill=tk.X, pady=(8, 0))
 
-        view_frame = ttk.Labelframe(main_frame, text="3. View Downloads", padding=12)
+        view_frame = ttk.Labelframe(main_frame, text="3. Files", padding=12)
         view_frame.pack(fill=tk.X, pady=(0, 16))
 
-        self.view_button = ttk.Button(view_frame, text="Open Download Folder",
-                                      command=self.view_videos, style="Secondary.TButton")
-        self.view_button.pack(fill=tk.X, ipady=5)
+        self.view_button = ttk.Button(view_frame, text="Open download folder",
+                                       command=self.view_videos, style="Secondary.TButton")
+        self.view_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.remove_failed_button = ttk.Button(
             view_frame, text="Remove failed media",
             command=self.remove_failed_media_thread, style="Secondary.TButton")
         # Packed only when recovery or legacy loose-image candidates exist.
 
-        debug_frame = ttk.Labelframe(main_frame, text="Logs", padding=12)
+        debug_frame = ttk.Labelframe(main_frame, text="Activity", padding=12)
         debug_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
         debug_toolbar = ttk.Frame(debug_frame)
@@ -149,7 +162,7 @@ class DownloaderApp(tk.Tk):
         clear_button = ttk.Button(debug_toolbar, text="Clear", command=self.clear_debug,
                                   style="LogTool.TButton", width=7)
         clear_button.pack(side=tk.RIGHT)
-        copy_button = ttk.Button(debug_toolbar, text="Copy All", command=self.copy_debug,
+        copy_button = ttk.Button(debug_toolbar, text="Copy all", command=self.copy_debug,
                                  style="LogTool.TButton", width=9)
         copy_button.pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -157,7 +170,9 @@ class DownloaderApp(tk.Tk):
             debug_frame, height=14, width=80, state=tk.DISABLED, wrap=tk.WORD,
             bg=COLOR_FIELD, fg=COLOR_FG, font=("Consolas", 10),
             insertbackground=COLOR_FG, selectbackground=COLOR_SELECT,
-            padx=8, pady=6, spacing1=2, spacing3=2)
+            padx=12, pady=8, spacing1=2, spacing3=2,
+            relief=tk.FLAT, borderwidth=0, highlightthickness=1,
+            highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
         self.debug_area.pack(fill=tk.BOTH, expand=True)
 
         # Debug-log tags: level coloring + muted timestamp prefix.
@@ -167,10 +182,10 @@ class DownloaderApp(tk.Tk):
         self.debug_area.tag_configure("warning", foreground=DEBUG_WARNING_FG)
 
         self.debug_menu = tk.Menu(self, tearoff=0)
-        self.debug_menu.add_command(label="Copy All", command=self.copy_debug)
-        self.debug_menu.add_command(label="Select All", command=self.select_debug)
+        self.debug_menu.add_command(label="Copy all", command=self.copy_debug)
+        self.debug_menu.add_command(label="Select all", command=self.select_debug)
         self.debug_menu.add_separator()
-        self.debug_menu.add_command(label="Clear Log", command=self.clear_debug)
+        self.debug_menu.add_command(label="Clear activity", command=self.clear_debug)
         self.debug_area.bind("<Button-3>", self._show_debug_menu)
         self.debug_area.bind("<Control-a>", lambda event: (self.select_debug(), "break")[1])
 
@@ -209,7 +224,9 @@ class DownloaderApp(tk.Tk):
                         fieldbackground=COLOR_FIELD, bordercolor=COLOR_BORDER)
         style.configure("TFrame", background=COLOR_BG)
         style.configure("TLabel", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("Segoe UI", 10))
+                         font=("Segoe UI", 10))
+        style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_FG,
+                        font=("Segoe UI", 18))
         style.configure("Muted.TLabel", background=COLOR_BG, foreground=COLOR_FG_MUTED,
                         font=("Segoe UI", 9))
         style.configure("Hint.TLabel", background=COLOR_BG, foreground=COLOR_WARNING,
@@ -226,14 +243,15 @@ class DownloaderApp(tk.Tk):
                         font=("Segoe UI", 9))
 
         # Secondary/neutral buttons: quiet surface, hairline border.
-        style.configure("TButton", font=("Segoe UI", 10), borderwidth=1, padding=10,
+        style.configure("TButton", font=("Segoe UI", 10), borderwidth=1, padding=(12, 8),
                         background=COLOR_SURFACE, foreground=COLOR_FG,
                         bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER,
                         darkcolor=COLOR_BORDER)
         style.map("TButton",
                   background=[("disabled", COLOR_DISABLED_BG), ("pressed", COLOR_SURFACE),
                               ("active", COLOR_SURFACE_HOVER)],
-                  foreground=[("disabled", COLOR_DISABLED_FG)])
+                   foreground=[("disabled", COLOR_DISABLED_FG)])
+        style.map("TButton", bordercolor=[("focus", COLOR_PRIMARY)])
 
         style.configure("Secondary.TButton", background=COLOR_SURFACE, foreground=COLOR_FG)
         style.map("Secondary.TButton",
@@ -243,7 +261,8 @@ class DownloaderApp(tk.Tk):
 
         # Primary: the one green accent, with dark text for AA contrast.
         style.configure("Primary.TButton", background=COLOR_PRIMARY,
-                        foreground=COLOR_ON_PRIMARY, bordercolor=COLOR_PRIMARY)
+                         foreground=COLOR_ON_PRIMARY, bordercolor=COLOR_PRIMARY,
+                         padding=(12, 12))
         style.map("Primary.TButton",
                   background=[("disabled", COLOR_DISABLED_BG),
                               ("pressed", COLOR_PRIMARY_PRESS),
@@ -253,7 +272,7 @@ class DownloaderApp(tk.Tk):
                                ("active", COLOR_PRIMARY_HOVER)])
 
         # Small, quiet toolbar buttons above the debug log.
-        style.configure("LogTool.TButton", font=("Segoe UI", 9), padding=(8, 2),
+        style.configure("LogTool.TButton", font=("Segoe UI", 9), padding=(8, 4),
                         background=COLOR_SURFACE, foreground=COLOR_FG_MUTED)
         style.map("LogTool.TButton",
                   background=[("disabled", COLOR_DISABLED_BG), ("pressed", COLOR_SURFACE),
@@ -279,17 +298,21 @@ class DownloaderApp(tk.Tk):
         except OSError:
             links_ready = False
         self.browser_button.config(
-            text="Browser is Open" if self.driver is not None else "Open Browser",
+            text="Browser open" if self.driver is not None else "Open browser",
             state=tk.DISABLED if self.busy or self.driver is not None else tk.NORMAL)
         self.scrape_button.config(
-            text="Scrape Links",
+            text="Collect links",
             state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
         self.download_button.config(
-            text="Working…" if self.busy else "Download Collection",
+            text="Working…" if self.busy else "Download collection",
             state=tk.DISABLED if self.busy or not links_ready else tk.NORMAL)
         self.download_hint.config(
             text="" if links_ready or self.busy
-            else "Run scraping first — no links collected yet")
+            else "Collect links from a saved collection first")
+        if links_ready or self.busy:
+            self.download_hint.pack_forget()
+        else:
+            self.download_hint.pack(fill=tk.X, pady=(8, 0))
         if self.__dict__.get('remove_failed_button') is not None:
             self._refresh_recovery_button()
 
@@ -335,7 +358,7 @@ class DownloaderApp(tk.Tk):
         if name:
             self.folder_path_label.config(
                 text=f"Saves to:  {os.path.join(BASE_DIR, name)}\n"
-                "New downloads: videos in completed_videos/; photos in photos/.")
+                "Videos → completed_videos/    Photos → photos/")
         else:
             self.folder_path_label.config(text="Enter a folder name above.")
         if self.__dict__.get('remove_failed_button') is not None:
@@ -347,7 +370,8 @@ class DownloaderApp(tk.Tk):
         nonempty = bool(name) and has_failed_media(os.path.join(BASE_DIR, name))
         if nonempty:
             if not self.remove_failed_button.winfo_manager():
-                self.remove_failed_button.pack(fill=tk.X, ipady=5, pady=(8, 0))
+                self.remove_failed_button.pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
             self.remove_failed_button.config(state=tk.DISABLED if self.busy else tk.NORMAL)
         else:
             self.remove_failed_button.pack_forget()
@@ -624,11 +648,15 @@ class DownloaderApp(tk.Tk):
                         self.debug_area.delete('end-1c linestart', 'end-1c lineend')
                         self._line_open = False
                     self._debug_replace = False
+                    line_start = not self._line_open
                     if not self._line_open:
                         self.debug_area.mark_set('debug_line', 'end-1c linestart')
                         self.debug_area.insert(tk.END, time.strftime("%H:%M:%S ") + "│ ", "timestamp")
                         self._line_open = True
-                    self.debug_area.insert(tk.END, body, self._level_tag(body))
+                    display = body.translate(LOG_DECORATION).replace('[thread] ', '')
+                    if line_start:
+                        display = display.lstrip()
+                    self.debug_area.insert(tk.END, display, self._level_tag(body))
             if self._debug_follow or self._debug_at_bottom():
                 self.debug_area.see(tk.END)
             self._update_debug_count()
@@ -638,7 +666,8 @@ class DownloaderApp(tk.Tk):
     def _overwrite_debug_line(self, body):
         """Replace the last line's content (for \r progress ticks)."""
         self.debug_area.delete('end-1c linestart', 'end-1c lineend')
-        self.debug_area.insert(tk.END, body, self._level_tag(body))
+        self.debug_area.insert(
+            tk.END, body.translate(LOG_DECORATION).lstrip(), self._level_tag(body))
 
     @staticmethod
     def _level_tag(text: str) -> str:
