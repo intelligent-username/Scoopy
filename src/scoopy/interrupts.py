@@ -7,9 +7,12 @@ import subprocess
 import threading
 from types import FrameType
 
+from .browser_cleanup import close_profile_browser
+from .paths import CHROME_PROFILE_DIR
+
 
 INTERRUPT_EXIT_CODE = 130
-INTERRUPT_TIMEOUT_SECONDS = 2.0
+INTERRUPT_TIMEOUT_SECONDS = 6.0
 TREE_TIMEOUT_SECONDS = 1.5
 
 
@@ -32,16 +35,17 @@ def make_interrupt_handler() -> Callable[[int, FrameType | None], None]:
 
     Windows taskkill can terminate us before exit(130) executes. Other platforms
     exit(130) without attempting descendant cleanup: no safe portable owned-tree
-    primitive is available here. A second SIGINT skips cleanup and exits at once.
+    primitive is available here. Repeated SIGINT does not abandon browser cleanup.
     The watchdog also covers a stuck process-launch/cleanup call, provided Python
-    threads can still run. Neither path invokes Tk, logging, or graceful quit.
+    threads can still run. Browser cleanup targets Scoopy's exact profile before
+    taskkill can terminate Python; detached Chrome is not necessarily our child.
+    Neither path invokes Tk or waits for an operation worker.
     """
     interrupted = False
 
     def handle_interrupt(signum: int, frame: FrameType | None) -> None:
         nonlocal interrupted
         if interrupted:
-            os._exit(INTERRUPT_EXIT_CODE)
             return
         interrupted = True
         try:
@@ -51,7 +55,10 @@ def make_interrupt_handler() -> Callable[[int, FrameType | None], None]:
                 )
                 watchdog.daemon = True
                 watchdog.start()
-                _terminate_windows_tree()
+                try:
+                    close_profile_browser(CHROME_PROFILE_DIR)
+                finally:
+                    _terminate_windows_tree()
         except (OSError, subprocess.SubprocessError):
             # Terminal termination must survive missing taskkill or timeout.
             pass

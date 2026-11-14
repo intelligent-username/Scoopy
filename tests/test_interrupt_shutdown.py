@@ -34,10 +34,17 @@ class InterruptHandlerTests(unittest.TestCase):
         )
         self.flags_patch.start()
         self.addCleanup(self.flags_patch.stop)
+        self.browser_cleanup = self.enterContext(
+            patch.object(interrupts, "close_profile_browser", return_value=True))
 
     def test_windows_interrupt_targets_only_own_pid_tree_with_bounded_wait(self):
+        order = Mock()
+        order.attach_mock(self.browser_cleanup, "browser")
+        order.attach_mock(self.run, "tree")
         interrupts.make_interrupt_handler()(signal.SIGINT, None)
 
+        self.browser_cleanup.assert_called_once_with(interrupts.CHROME_PROFILE_DIR)
+        self.assertEqual([call[0] for call in order.mock_calls], ["browser", "tree"])
         command = self.run.call_args.args[0]
         expected_executable = Path(r"C:\Windows") / "System32" / "taskkill.exe"
         self.assertEqual(
@@ -68,8 +75,9 @@ class InterruptHandlerTests(unittest.TestCase):
         handler(signal.SIGINT, None)
         handler(signal.SIGINT, None)
         self.run.assert_called_once()
+        self.browser_cleanup.assert_called_once()
         self.timer.assert_called_once()
-        self.assertEqual(self.exit_process.call_count, 2)
+        self.exit_process.assert_called_once_with(130)
 
     def test_cleanup_errors_always_exit_without_logging(self):
         for error in (OSError("private details"), subprocess.TimeoutExpired("taskkill", 1)):
@@ -160,6 +168,7 @@ class IsolatedInterruptProbeTests(unittest.TestCase):
             "from scoopy import interrupts\n"
             "interrupts.os = SimpleNamespace(name='nt', _exit=os._exit)\n"
             "interrupts.INTERRUPT_TIMEOUT_SECONDS = 0.15\n"
+            "interrupts.close_profile_browser = lambda profile: True\n"
             "interrupts._terminate_windows_tree = lambda: time.sleep(30)\n"
             "signal.signal(signal.SIGINT, interrupts.make_interrupt_handler())\n"
             "signal.raise_signal(signal.SIGINT)\n"
