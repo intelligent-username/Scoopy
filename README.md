@@ -1,13 +1,13 @@
 # Scoopy
 
+![Nice little banner](src/imgs/Banner.jpg)
+
 Scoopy is a desktop app for collecting links from your Instagram saved collections.
 
 ## Requirements
 
 - Windows x64, macOS (Intel or Apple Silicon), or Linux (glibc, x86-64 or ARM64)
 - Python 3.11, 3.12, or 3.13, with Tkinter
-- A GUI desktop session, internet access, and an Instagram account
-- No browser install required: Scoopy asks Selenium to download a managed Chrome for Testing (first run needs internet and disk space; after that it's cached)
 
 ## Install
 
