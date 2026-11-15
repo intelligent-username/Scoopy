@@ -8,7 +8,10 @@ import threading
 from types import FrameType
 
 from .browser_cleanup import close_profile_browser
-from .paths import CHROME_PROFILE_DIR
+from .paths import (
+    CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR, PROFILE_UNLOCK_MARKER,
+)
+from .profile_crypto import lock_session_profile
 
 
 INTERRUPT_EXIT_CODE = 130
@@ -59,6 +62,12 @@ def make_interrupt_handler() -> Callable[[int, FrameType | None], None]:
                     close_profile_browser(CHROME_PROFILE_DIR)
                 finally:
                     _terminate_windows_tree()
+            try:
+                lock_session_profile(
+                    CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR,
+                    PROFILE_UNLOCK_MARKER)
+            except Exception:
+                pass  # Terminal termination must never be blocked.
         except (OSError, subprocess.SubprocessError):
             # Terminal termination must survive missing taskkill or timeout.
             pass

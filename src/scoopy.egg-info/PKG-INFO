@@ -7,6 +7,7 @@ Description-Content-Type: text/markdown
 Requires-Dist: selenium<5,>=4.49
 Requires-Dist: yt-dlp>=2025.10.22
 Requires-Dist: pymp4v2==0.1.13
+Requires-Dist: cryptography>=42.0
 Provides-Extra: build
 Requires-Dist: pyinstaller; extra == "build"
 
@@ -67,9 +68,21 @@ Scoopy reads Instagram cookies from its own browser session into memory for each
 
 ## Data and privacy
 
-For source and editable installs, the browser profiles (`.chrome-profile/`, `.edge-profile/`, `.firefox-profile/`), `links.txt`, and the default `videos/` folder are stored in the clone, regardless of where you run `scoopy`. A frozen executable stores them beside the executable.
+For source and editable installs, the browser profiles (`.chrome-profile/`, `.edge-profile/`, `.firefox-profile/`), the encrypted profile container (`.chrome-profile.enc/`), the unlock marker (`.scoopy-profile.unlocked`), `links.txt`, and the default `videos/` folder are stored in the clone, regardless of where you run `scoopy`. A frozen executable stores them beside the executable.
 
 Each browser gets its own dedicated persistent Scoopy profile, separate from your regular browser profile, so its Instagram login must be completed once and can persist between runs. **Profile folders contain sensitive session data.** They are listed in `.gitignore`, but do not share or commit them. To reset a profile, close Scoopy's browser and delete the matching folder; you will need to sign in again. Avoid running multiple app instances against the same profile.
+
+### Profile encryption (optional)
+
+Scoopy can encrypt its browser profile at rest with a passphrase. When enabled:
+
+- The profile is stored as an encrypted container (`.chrome-profile.enc/`) and is only decrypted when you open the browser.
+- You will be prompted for the passphrase each time you click **Open browser** (unless you already unlocked it in the current app session).
+- The profile is re-encrypted when you close the browser, close the app, click **Lock profile**, or press Ctrl+C.
+- **There is no passphrase recovery.** If you forget it, your saved Instagram login cannot be restored and you will need to sign in again.
+- **The profile is necessarily decrypted while Chrome is running.** Encryption protects the profile at rest only.
+- Ctrl+C and process crashes are best-effort; a hard kill can leave a plaintext copy. Use **Lock profile** and close Scoopy normally for the strongest guarantee.
+- Cache directories (`Cache/`, `Code Cache/`, `GPUCache/`, `Crashpad/`, etc.) are excluded from encryption to keep the container small. Chrome recreates them on next launch.
 
 ## Troubleshooting
 

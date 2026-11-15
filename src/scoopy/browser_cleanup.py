@@ -39,10 +39,12 @@ def run_bounded(action: Callable[[], object], timeout: float) -> bool:
     return completed.wait(timeout) and succeeded.is_set()
 
 
-def start_cleanup(action: Callable[[], object]) -> threading.Thread:
-    """Keep cleanup alive after Tk exits, but for at most CLEANUP_TIMEOUT."""
+def start_cleanup(action: Callable[[], object],
+                  timeout: float | None = None) -> threading.Thread:
+    """Keep cleanup alive after Tk exits, but for at most `timeout`."""
+    budget = CLEANUP_TIMEOUT if timeout is None else timeout
     supervisor = threading.Thread(
-        target=run_bounded, args=(action, CLEANUP_TIMEOUT),
+        target=run_bounded, args=(action, budget),
         name="scoopy-browser-cleanup", daemon=False,
     )
     supervisor.start()

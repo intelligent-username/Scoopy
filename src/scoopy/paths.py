@@ -8,3 +8,5 @@ else:
 
 LINKS_FILE = os.path.join(BASE_DIR, 'links.txt')
 CHROME_PROFILE_DIR = os.path.join(BASE_DIR, '.chrome-profile')
+ENCRYPTED_PROFILE_DIR = os.path.join(BASE_DIR, '.chrome-profile.enc')
+PROFILE_UNLOCK_MARKER = os.path.join(BASE_DIR, '.scoopy-profile.unlocked')

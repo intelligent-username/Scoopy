@@ -9,14 +9,18 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, simpledialog, messagebox
 from selenium.common.exceptions import WebDriverException
 
 from . import download as media_download
+from . import profile_crypto
 from .browser import start_driver, collect_reel_links, save_links
 from .cancellation import OperationCancelled, check_cancel
 from .download import RECOVERY_DIR_NAME, has_failed_media, remove_failed_media, start_download
-from .paths import BASE_DIR, CHROME_PROFILE_DIR, LINKS_FILE
+from .paths import (
+    BASE_DIR, CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR, LINKS_FILE,
+    PROFILE_UNLOCK_MARKER,
+)
 from .session import AppError, navigate_to_saved, read_browser_cookies
 
 APP_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'app-icon.png')
@@ -55,7 +59,8 @@ DEBUG_SUCCESS_FG = "#8BDC96"
 DEBUG_WARNING_FG = "#E9BC66"
 
 # Producers keep their diagnostic messages; the desktop log omits emoji chrome.
-LOG_DECORATION = str.maketrans('', '', '🚀🌐🔑🔎✅⚠🔗💾🍪📄📥📁📂🔄🛑📦🗂\ufe0f')
+LOG_DECORATION = str.maketrans(
+    '', '', '🚀🌐🔑🔎✅⚠🔗💾🍪📄📥📁📂🔄🛑📦🗂🔐🔓\ufe0f')
 
 
 # --- Main GUI Application Class ---
@@ -72,6 +77,7 @@ class DownloaderApp(tk.Tk):
         self.closing = threading.Event()
         self.driver_lock = threading.Lock()
         self.retry_states: dict[str, media_download.DownloadRetryState] = {}
+        self.settings_visible = False
 
         self.setup_ui()
         self.configure_styles()
@@ -93,13 +99,22 @@ class DownloaderApp(tk.Tk):
 
         main_frame = ttk.Frame(self, padding=24)
         main_frame.pack(fill=tk.BOTH, expand=True)
+        self.main_page = main_frame
 
         heading = ttk.Frame(main_frame)
         heading.pack(fill=tk.X, pady=(0, 16))
-        ttk.Label(heading, text="Scoopy", style="Title.TLabel").pack(anchor=tk.W)
+
+        heading_text = ttk.Frame(heading)
+        heading_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(heading_text, text="Scoopy", style="Title.TLabel").pack(anchor=tk.W)
         ttk.Label(
-            heading, text="Instagram collections, saved locally",
+            heading_text, text="Instagram collections, saved locally",
             style="Muted.TLabel").pack(anchor=tk.W, pady=(4, 0))
+
+        self.settings_button = ttk.Button(
+            heading, text="\u2699", command=self.show_settings_page,
+            style="Icon.TButton", width=3)
+        self.settings_button.pack(side=tk.RIGHT, anchor=tk.N)
 
         folder_frame = ttk.Labelframe(main_frame, text="1. Save to", padding=12)
         folder_frame.pack(fill=tk.X, pady=(0, 16))
@@ -215,14 +230,78 @@ class DownloaderApp(tk.Tk):
         self.debug_area.mark_set('debug_line', '1.0')
         self.debug_area.mark_gravity('debug_line', tk.LEFT)
 
+        # Settings is a second page in this window; only one page is packed.
+        self.settings_page = ttk.Frame(self, padding=24)
+        self._build_settings_page()
+
+    def _build_settings_page(self):
+        """Lay out the settings page hidden until the gear button is used."""
+        heading = ttk.Frame(self.settings_page)
+        heading.pack(fill=tk.X, pady=(0, 16))
+
+        self.back_button = ttk.Button(
+            heading, text="\u2190 Back", command=self.show_main_page,
+            style="Secondary.TButton", width=8)
+        self.back_button.pack(side=tk.LEFT)
+        ttk.Label(heading, text="Settings", style="Title.TLabel").pack(
+            side=tk.LEFT, padx=(12, 0))
+
+        profile_frame = ttk.Labelframe(
+            self.settings_page, text="Browser profile", padding=12)
+        profile_frame.pack(fill=tk.X)
+
+        ttk.Label(
+            profile_frame,
+            text=("Scoopy keeps its Instagram login in a dedicated browser profile. "
+                  "Encrypting it protects that saved session while Scoopy is closed; "
+                  "the profile is plaintext whenever the browser is open."),
+            style="Muted.TLabel", wraplength=640, justify=tk.LEFT).pack(anchor=tk.W)
+
+        self.profile_status_label = ttk.Label(
+            profile_frame, text="", style="Muted.TLabel")
+        self.profile_status_label.pack(anchor=tk.W, pady=(8, 0))
+
+        profile_actions = ttk.Frame(profile_frame)
+        profile_actions.pack(fill=tk.X, pady=(12, 0))
+        profile_actions.columnconfigure((0, 1), weight=1, uniform="profile-actions")
+
+        self.profile_button = ttk.Button(
+            profile_actions, text="Enable encryption",
+            command=self.toggle_profile_encryption, style="Secondary.TButton")
+        self.profile_button.grid(row=0, column=0, sticky="ew")
+
+        self.profile_lock_button = ttk.Button(
+            profile_actions, text="Lock profile",
+            command=self.lock_profile_now, style="Secondary.TButton",
+            state=tk.DISABLED)
+        self.profile_lock_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+    def show_settings_page(self):
+        """Swap the workflow for the settings page inside the same window."""
+        if self.settings_visible:
+            return
+        self.main_page.pack_forget()
+        self.settings_page.pack(fill=tk.BOTH, expand=True)
+        self.settings_visible = True
+        self._refresh_profile_controls()
+
+    def show_main_page(self):
+        """Return from settings to the main workflow page."""
+        if not self.settings_visible:
+            return
+        self.settings_page.pack_forget()
+        self.main_page.pack(fill=tk.BOTH, expand=True)
+        self.settings_visible = False
+
     def _apply_window_icon(self):
         """Set the window/taskbar icon; keep a reference to avoid GC."""
         try:
-            if platform.system() == 'Windows':
-                # The multi-size .ico lets Windows pick a natively drawn
-                # 16px titlebar icon instead of shrinking the 256px bitmap.
-                self.iconbitmap(APP_ICON_ICO)
-                return
+            if platform.system() == 'Windows' and os.path.isfile(APP_ICON_ICO):
+                try:
+                    self.iconbitmap(APP_ICON_ICO)
+                    return
+                except tk.TclError:
+                    pass  # Fall through to the PNG instead of Tk's default icon.
             self._app_icon = tk.PhotoImage(file=APP_ICON_PATH)
             self.iconphoto(True, self._app_icon)
         except tk.TclError:
@@ -284,6 +363,13 @@ class DownloaderApp(tk.Tk):
                   bordercolor=[("disabled", COLOR_DISABLED_BG),
                                ("active", COLOR_PRIMARY_HOVER)])
 
+        # Square, quiet button used for the settings gear in the header.
+        style.configure("Icon.TButton", font=("Segoe UI Symbol", 12), padding=(6, 4))
+        style.map("Icon.TButton",
+                  background=[("disabled", COLOR_DISABLED_BG), ("pressed", COLOR_SURFACE),
+                              ("active", COLOR_SURFACE_HOVER)],
+                  foreground=[("disabled", COLOR_DISABLED_FG)])
+
         # Small, quiet toolbar buttons above the debug log.
         style.configure("LogTool.TButton", font=("Segoe UI", 9), padding=(8, 4),
                         background=COLOR_SURFACE, foreground=COLOR_FG_MUTED)
@@ -337,15 +423,153 @@ class DownloaderApp(tk.Tk):
                     text="Cancelling…" if event.is_set() else "Cancel",
                     state=tk.DISABLED if event.is_set() else tk.NORMAL)
                 if not self.cancel_button.winfo_manager():
-                    self.cancel_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+                    if self.download_hint.winfo_ismapped():
+                        self.cancel_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+                    else:
+                        self.cancel_button.pack(fill=tk.X, pady=(8, 0))
             else:
                 self.cancel_button.pack_forget()
+        if self.__dict__.get('profile_button') is not None:
+            self._refresh_profile_controls()
 
     def cancel_operation(self):
         """Request cancellation; worker cleanup still owns operation completion."""
         if self.busy and self.operation_event is not None:
             self.operation_event.set()
             self.update_buttons()
+
+    def _ask_passphrase(self, title: str, prompt: str) -> str | None:
+        try:
+            return simpledialog.askstring(title, prompt, show='•', parent=self)
+        except tk.TclError:
+            return None
+
+    def _refresh_profile_controls(self):
+        """Reflect encrypted/unlocked state without touching the profile."""
+        encrypted = profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR)
+        unlocked = profile_crypto.is_unlocked(
+            PROFILE_UNLOCK_MARKER, CHROME_PROFILE_DIR)
+        can_manage = not self.busy and self.driver is None
+        if encrypted:
+            if unlocked:
+                status = "Encrypted at rest · Unlocked for this session"
+            else:
+                status = "Encrypted at rest"
+            self.profile_button.config(
+                text="Disable encryption",
+                state=tk.NORMAL if can_manage else tk.DISABLED)
+            self.profile_lock_button.config(
+                text="Lock profile",
+                state=tk.NORMAL if can_manage and unlocked else tk.DISABLED)
+        else:
+            status = "Not encrypted · Profile is stored in plaintext"
+            self.profile_button.config(
+                text="Enable encryption",
+                state=tk.NORMAL if can_manage else tk.DISABLED)
+            self.profile_lock_button.config(text="Lock profile", state=tk.DISABLED)
+        self.profile_status_label.config(text=status)
+
+    def toggle_profile_encryption(self):
+        if self.busy or self.closing.is_set():
+            return
+        if self.driver is not None:
+            messagebox.showwarning(
+                "Close the browser",
+                "Close Scoopy's browser before changing profile encryption.",
+                parent=self)
+            return
+        if profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR):
+            self._disable_profile_encryption()
+        else:
+            self._enable_profile_encryption()
+
+    def _enable_profile_encryption(self):
+        first = self._ask_passphrase(
+            "Enable profile encryption",
+            f"Choose a passphrase (at least {profile_crypto.MIN_PASSPHRASE_LENGTH} characters):")
+        if first is None:
+            return
+        second = self._ask_passphrase(
+            "Confirm passphrase", "Enter the same passphrase again:")
+        if second is None:
+            return
+        if first != second:
+            messagebox.showerror(
+                "Passphrases do not match",
+                "The passphrases did not match. Nothing was changed.",
+                parent=self)
+            return
+        if len(first) < profile_crypto.MIN_PASSPHRASE_LENGTH or not first.strip():
+            messagebox.showerror(
+                "Passphrase too short",
+                f"Use a passphrase of at least {profile_crypto.MIN_PASSPHRASE_LENGTH} characters.",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Enable profile encryption?",
+                "Scoopy will encrypt its browser profile and delete the plaintext copy.\n\n"
+                "There is no passphrase recovery. If you forget it, your saved Instagram "
+                "login cannot be restored and you will need to sign in again.\n\n"
+                "The profile is plaintext while the browser is open.\n\nContinue?",
+                parent=self, default=messagebox.NO):
+            return
+        self.start_operation(
+            lambda: profile_crypto.enable_encryption(
+                first, CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR),
+            lambda count: self._profile_changed(
+                f"Encrypted the browser profile ({count} files)."))
+
+    def _disable_profile_encryption(self):
+        passphrase = self._ask_passphrase(
+            "Disable profile encryption", "Enter your profile passphrase:")
+        if passphrase is None:
+            return
+        if not messagebox.askyesno(
+                "Disable profile encryption?",
+                "Scoopy will decrypt the browser profile and remove the encrypted copy. "
+                "The profile will be stored unencrypted. Continue?",
+                parent=self, default=messagebox.NO):
+            return
+        self.start_operation(
+            lambda: profile_crypto.disable_encryption(
+                passphrase, ENCRYPTED_PROFILE_DIR, CHROME_PROFILE_DIR,
+                PROFILE_UNLOCK_MARKER),
+            lambda _: self._profile_changed(
+                "Profile encryption disabled. The profile is stored unencrypted."))
+
+    def lock_profile_now(self):
+        if self.busy or self.closing.is_set():
+            return
+        if self.driver is not None:
+            messagebox.showwarning(
+                "Close the browser",
+                "Close Scoopy's browser before locking the profile.",
+                parent=self)
+            return
+        if not profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR):
+            return
+        if profile_crypto.current_session_key() is None:
+            passphrase = self._ask_passphrase(
+                "Unlock profile", "Enter your profile passphrase:")
+            if passphrase is None:
+                return
+            try:
+                profile_key = profile_crypto.verify_passphrase(
+                    passphrase, ENCRYPTED_PROFILE_DIR)
+            except profile_crypto.ProfileEncryptionError as error:
+                messagebox.showerror("Profile lock", str(error), parent=self)
+                return
+            profile_crypto.remember_session_key(profile_key)
+        self.start_operation(
+            lambda: profile_crypto.lock_session_profile(
+                CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR, PROFILE_UNLOCK_MARKER),
+            lambda locked: self._profile_changed(
+                "Profile locked." if locked else "Nothing to lock."))
+
+    def _profile_changed(self, message: str):
+        print(f"🔐 {message}")
+        self._refresh_profile_controls()
+        messagebox.showinfo("Profile encryption", message, parent=self)
 
     def start_operation(self, target, on_success, *, cancellable=False):
         if self.busy:
@@ -407,12 +631,16 @@ class DownloaderApp(tk.Tk):
         name = self.folder_name_var.get().strip()
         directory = os.path.normcase(os.path.abspath(os.path.join(BASE_DIR, name)))
         state = self.retry_states.get(directory) if name else None
+        hint_packed = self.download_hint.winfo_ismapped()
         if state is not None and state.failed_urls:
             self.retry_button.config(
                 text=f"Retry failed ({len(state.failed_urls)})",
                 state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
             if not self.retry_button.winfo_manager():
-                self.retry_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+                if hint_packed:
+                    self.retry_button.pack(fill=tk.X, pady=(8, 0), before=self.download_hint)
+                else:
+                    self.retry_button.pack(fill=tk.X, pady=(8, 0))
         else:
             self.retry_button.pack_forget()
         if self.__dict__.get('continue_button') is not None:
@@ -421,8 +649,11 @@ class DownloaderApp(tk.Tk):
                     text=f"Continue remaining ({len(state.remaining_urls)})",
                     state=tk.DISABLED if self.busy or self.driver is None else tk.NORMAL)
                 if not self.continue_button.winfo_manager():
-                    self.continue_button.pack(
-                        fill=tk.X, pady=(8, 0), before=self.download_hint)
+                    if hint_packed:
+                        self.continue_button.pack(
+                            fill=tk.X, pady=(8, 0), before=self.download_hint)
+                    else:
+                        self.continue_button.pack(fill=tk.X, pady=(8, 0))
             else:
                 self.continue_button.pack_forget()
 
@@ -535,30 +766,52 @@ class DownloaderApp(tk.Tk):
 
     def start_browser_thread(self):
         print("🚀 Open Browser button clicked.")
-        if self.driver is None:
-            self.start_operation(self.open_browser, self._on_browser_opened)
-        else:
+        if self.busy or self.closing.is_set():
+            return
+        if self.driver is not None:
             print("⚠️ Browser already open.")
+            return
+        passphrase = None
+        if (profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR)
+                and profile_crypto.current_session_key() is None):
+            passphrase = self._ask_passphrase(
+                "Unlock profile", "Enter your profile passphrase:")
+            if passphrase is None:
+                return
+        self.start_operation(
+            lambda: self.open_browser(passphrase=passphrase),
+            self._on_browser_opened)
 
     def _on_browser_opened(self, _):
         """Callback when browser opens successfully - refresh button states immediately."""
         print("✅ Browser open callback, updating buttons...")
         self.update_buttons()
 
-    def open_browser(self):
-        """
-        Runs in a thread. Opens the browser and stores the driver instance.
-        """
+    def open_browser(self, passphrase: str | None = None):
+        """Runs in a thread. Unlocks the profile, then opens the browser."""
         from .browser_cleanup import start_cleanup
 
         with self.driver_lock:
             if self.closing.is_set():
                 return
-            # Record launch intent so close also scans for a not-yet-published
-            # browser. start_driver itself still needs early registration.
             self.browser_was_open = True
-        print("🌐 [thread] Attempting to launch a browser...")
-        driver = start_driver()
+        encrypted = profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR)
+        try:
+            if encrypted:
+                print("🔐 Unlocking the encrypted browser profile...")
+                profile_key = profile_crypto.prepare_profile(
+                    passphrase, ENCRYPTED_PROFILE_DIR, CHROME_PROFILE_DIR,
+                    PROFILE_UNLOCK_MARKER)
+                profile_crypto.remember_session_key(profile_key)
+                print("🔓 Profile unlocked for this session.")
+            print("🌐 [thread] Attempting to launch a browser...")
+            driver = start_driver()
+        except Exception:
+            if encrypted:
+                profile_crypto.lock_session_profile(
+                    CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR,
+                    PROFILE_UNLOCK_MARKER)
+            raise
         with self.driver_lock:
             closing = self.closing.is_set()
             if not closing:
@@ -594,6 +847,7 @@ class DownloaderApp(tk.Tk):
                 logged_in = False
             except WebDriverException:
                 print("⚠️ Could not check Instagram login: the browser disconnected.")
+                self._lock_after_disconnect(driver)
                 return
             except Exception as error:
                 print(f"⚠️ Could not check Instagram login ({type(error).__name__}).")
@@ -610,6 +864,32 @@ class DownloaderApp(tk.Tk):
                     navigation_attempted = True
                     navigate_to_saved(driver)
             first_check = False
+
+    def _lock_after_disconnect(self, driver):
+        """Lock the profile only after confirming our browser is gone."""
+        if not profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR):
+            return
+        if profile_crypto.current_session_key() is None:
+            return
+        from .browser_cleanup import start_cleanup
+
+        def cleanup():
+            confirmed = shutdown_driver(driver)
+            if not confirmed:
+                confirmed = close_orphan_profile_chrome()
+            if not confirmed:
+                print("⚠️ The browser disconnected, but could not be confirmed closed. "
+                      "The profile stays unlocked until Scoopy closes.")
+                return
+            if profile_crypto.lock_session_profile(
+                    CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR,
+                    PROFILE_UNLOCK_MARKER):
+                print("🔐 Browser profile encrypted after the browser closed.")
+
+        try:
+            start_cleanup(cleanup, timeout=profile_crypto.LOCK_TIMEOUT_SECONDS)
+        except RuntimeError:
+            print("⚠️ Could not start the profile lock worker.")
 
     def start_scraping_thread(self):
         if self.busy:
@@ -720,9 +1000,9 @@ class DownloaderApp(tk.Tk):
 
     def download_videos(self, download_dir, *, retry_failed=False,
                         continue_remaining=False, cancel_event=None):
-        check_cancel(cancel_event)
         cookies = read_browser_cookies(self.driver)
         try:
+            check_cancel(cancel_event)
             print("🍪 Using the app browser's Instagram session in memory (no cookies file).")
             states = self.__dict__.setdefault('retry_states', {})
             directory = os.path.normcase(os.path.abspath(download_dir))
@@ -806,7 +1086,7 @@ class DownloaderApp(tk.Tk):
         # Keep all app messages (they contain our emojis anywhere in the line).
         if any(emoji in text for emoji in
                ('🚀', '🌐', '🔑', '🔎', '✅', '⚠️', '🔗', '💾',
-                '🍪', '📄', '📥', '📁', '📂', '🔄', '🛑', '📦', '🗂️')):
+                '🍪', '📄', '📥', '📁', '📂', '🔄', '🛑', '📦', '🗂️', '🔐', '🔓')):
             return False
         # urllib3 / requests boilerplate
         if t.startswith(('get ', 'post ', 'put ', 'delete ', 'head ', 'options ', 'patch ')):
@@ -964,10 +1244,18 @@ class DownloaderApp(tk.Tk):
                     close_orphan_profile_chrome()
             elif browser_was_open:
                 close_orphan_profile_chrome()
+            if profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR):
+                profile_crypto.lock_session_profile(
+                    CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR,
+                    PROFILE_UNLOCK_MARKER)
         # Register the bounded non-daemon owner before root/mainloop disappears.
         # Only this main-thread caller touches Tk, never the cleanup worker.
         try:
-            start_cleanup(cleanup)
+            start_cleanup(
+                cleanup,
+                timeout=(profile_crypto.LOCK_TIMEOUT_SECONDS
+                         if profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR)
+                         else None))
         except RuntimeError:
             print("Could not start browser cleanup worker.")
         finally:
