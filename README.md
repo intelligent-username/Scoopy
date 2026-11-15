@@ -1,6 +1,6 @@
 # Scoopy
 
-Scoopy is a desktop app for collecting links from your Instagram saved collections and downloading accessible videos with yt-dlp. Separate video and audio streams are combined with a built-in MP4 muxer — no FFmpeg installation needed.
+Scoopy is a desktop app for collecting links from your Instagram saved collections.
 
 ## Requirements
 
@@ -10,6 +10,16 @@ Scoopy is a desktop app for collecting links from your Instagram saved collectio
 - No browser install required: Scoopy asks Selenium to download a managed Chrome for Testing (first run needs internet and disk space; after that it's cached)
 
 ## Install
+
+### Platform-Specific Installers
+
+(Once released) Go to the [releases tab](https://github.com/Scoopy/Scoopy/releases) and download the appropriate installer for your platform:
+
+- `.exe` for Windows x64
+- `.dmg` for macOS (Intel or Apple Silicon)
+- `.AppImage` for Linux (glibc, x86-64 or ARM64)
+
+### Manual Install
 
 Clone the repository, then create a virtual environment in the project folder:
 
@@ -44,9 +54,9 @@ Alternatively, run `python main.py` from the cloned project folder. Keep the clo
 ## Use
 
 1. Choose a download folder in the app; the default is `videos`.
-2. Click **Open Browser for Login**. Scoopy uses an installed browser in preference order — Chrome, then Edge, then Firefox — and signs in separately in a dedicated profile.
+2. Click **Open Browser for Login**.
 3. Sign in to Instagram and navigate to a saved collection.
-4. Click **Start Scraping Links**. Scoopy scrolls through the collection and saves the links to `links.txt`.
+4. Click **Start Scraping Links**. Scoopy scrolls through the collection and saves the links to [`links.txt`].
 5. Keep the app's browser open on Instagram, then click **Download All Videos**.
 
 Downloads prefer a verified combined MP4. When video and audio come separately, Scoopy combines them internally without FFmpeg. Videos with no audio track available are saved as silent videos and reported as such. If a download or merge fails, the downloaded media is kept in a `recovery/` folder inside your download folder and the rest of the batch continues.
@@ -55,9 +65,21 @@ Scoopy reads Instagram cookies from its own browser session into memory for each
 
 ## Data and privacy
 
-For source and editable installs, the browser profiles (`.chrome-profile/`, `.edge-profile/`, `.firefox-profile/`), `links.txt`, and the default `videos/` folder are stored in the clone, regardless of where you run `scoopy`. A frozen executable stores them beside the executable.
+For source and editable installs, the browser profiles (`.chrome-profile/`, `.edge-profile/`, `.firefox-profile/`), the encrypted profile container (`.chrome-profile.enc/`), the unlock marker (`.scoopy-profile.unlocked`), `links.txt`, and the default `videos/` folder are stored in the clone, regardless of where you run `scoopy`. A frozen executable stores them beside the executable.
 
 Each browser gets its own dedicated persistent Scoopy profile, separate from your regular browser profile, so its Instagram login must be completed once and can persist between runs. **Profile folders contain sensitive session data.** They are listed in `.gitignore`, but do not share or commit them. To reset a profile, close Scoopy's browser and delete the matching folder; you will need to sign in again. Avoid running multiple app instances against the same profile.
+
+### Profile encryption (optional)
+
+Click the gear icon in the top-right corner to open the Settings page; the encryption controls live there, not on the main page. Scoopy can encrypt its browser profile at rest with a passphrase. When enabled:
+
+- The profile is stored as an encrypted container (`.chrome-profile.enc/`) and is only decrypted when you open the browser.
+- You will be prompted for the passphrase each time you click **Open browser** (unless you already unlocked it in the current app session).
+- The profile is re-encrypted when you close the browser, close the app, click **Lock profile**, or press Ctrl+C.
+- **There is no passphrase recovery.** If you forget it, your saved Instagram login cannot be restored and you will need to sign in again.
+- **The profile is necessarily decrypted while Chrome is running.** Encryption protects the profile at rest only.
+- Ctrl+C and process crashes are best-effort; a hard kill can leave a plaintext copy. Use **Lock profile** and close Scoopy normally for the strongest guarantee.
+- Cache directories (`Cache/`, `Code Cache/`, `GPUCache/`, `Crashpad/`, etc.) are excluded from encryption to keep the container small. Chrome recreates them on next launch.
 
 ## Troubleshooting
 

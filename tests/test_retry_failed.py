@@ -113,8 +113,9 @@ class FailedRetryTests(unittest.TestCase):
         self.assertEqual(button.winfo_manager(), 'pack')
         self.assertEqual(button.cget('text'), 'Retry failed (1)')
         app.start_retry_failed_thread()
-        app.start_operation.call_args.args[0]()
-        app.download_videos.assert_called_once_with(self.output, retry_failed=True)
+        event = threading.Event()
+        app.start_operation.call_args.args[0](event)
+        app.download_videos.assert_called_once_with(self.output, retry_failed=True, cancel_event=event)
         app.busy = True
         app._refresh_retry_button()
         self.assertIn('disabled', button.state())

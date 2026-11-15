@@ -12,6 +12,7 @@ dependencies = [
     "selenium>=4.49,<5",
     "yt-dlp>=2025.10.22",
     "pymp4v2==0.1.13",
+    "cryptography>=42.0",
 ]
 
 [project.scripts]

@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -5,6 +6,7 @@ import runpy
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -13,6 +15,10 @@ import venv
 from scoopy import browser, download, paths, ui
 
 ROOT = Path(__file__).resolve().parents[1]
+# The editable install below runs with --no-build-isolation, so the base
+# interpreter must supply setuptools. Slim interpreters (e.g. uv-managed
+# CPython) ship without it.
+HAS_SETUPTOOLS = importlib.util.find_spec('setuptools') is not None
 
 
 class LauncherTests(unittest.TestCase):
@@ -43,13 +49,17 @@ class LauncherTests(unittest.TestCase):
         app = SimpleNamespace(busy=False, driver=Mock(), folder_name_var=Mock(), start_operation=Mock())
         for folder in ('videos', os.path.abspath('absolute')):
             app.folder_name_var.get.return_value = folder
-            with patch.object(ui.os.path, 'exists', return_value=True), patch.object(ui.os.path, 'getsize', return_value=1):
+            with patch.object(ui.os.path, 'exists', return_value=True), patch.object(ui.os.path, 'getsize', return_value=1), patch('builtins.print'):
                 ui.DownloaderApp.start_download_thread(app)
             with patch.object(ui.DownloaderApp, 'download_videos', create=True):
                 app.download_videos = Mock()
-                app.start_operation.call_args.args[0]()
-                app.download_videos.assert_called_once_with(os.path.join(paths.BASE_DIR, folder))
+                event = threading.Event()
+                app.start_operation.call_args.args[0](event)
+                app.download_videos.assert_called_once_with(os.path.join(paths.BASE_DIR, folder), cancel_event=event)
 
+    @unittest.skipUnless(
+        HAS_SETUPTOOLS,
+        'base interpreter cannot provide setuptools for --no-build-isolation')
     def test_editable_command_from_another_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
@@ -60,7 +70,7 @@ class LauncherTests(unittest.TestCase):
             env = dict(os.environ, PIP_NO_INDEX='1', PIP_DISABLE_PIP_VERSION_CHECK='1', PYTHONDONTWRITEBYTECODE='1')
             env.pop('PYTHONPATH', None)
             subprocess.run([str(python), '-m', 'pip', 'install', '-e', str(ROOT), '--no-build-isolation', '--no-deps'], cwd=temp, env=env, check=True, capture_output=True, text=True)
-            code = "import json,importlib.metadata as m; from scoopy import paths; e=[e.value for e in m.distribution('scoopy-instagram-collections').entry_points if e.name=='scoopy']; print(json.dumps([e,paths.BASE_DIR,paths.LINKS_FILE,paths.CHROME_PROFILE_DIR]))"
+            code = "import json,importlib.metadata as m; from scoopy import paths; e=[e.value for e in m.distribution('scoopy').entry_points if e.name=='scoopy']; print(json.dumps([e,paths.BASE_DIR,paths.LINKS_FILE,paths.CHROME_PROFILE_DIR]))"
             result = subprocess.run([str(python), '-B', '-c', code], cwd=temp, env=env, check=True, capture_output=True, text=True)
             self.assertEqual(json.loads(result.stdout), [['scoopy.ui:main'], str(ROOT), str(ROOT / 'links.txt'), str(ROOT / '.chrome-profile')])
             hook = temp / 'hook'; hook.mkdir()

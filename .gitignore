@@ -1,4 +1,8 @@
 /.chrome-profile/
+/.chrome-profile.enc/
+/.chrome-profile.enc.bak-*/
+/.scoopy-profile-tmp-*/
+/.scoopy-profile.unlocked
 /.edge-profile/
 /.firefox-profile/
 

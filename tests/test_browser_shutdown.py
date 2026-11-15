@@ -172,7 +172,7 @@ class WindowCloseTests(unittest.TestCase):
                 app = app_with(browser_was_open=attempted)
                 done = threading.Event()
 
-                def run_cleanup(action):
+                def run_cleanup(action, timeout=None):
                     def work():
                         try:
                             action()
@@ -208,7 +208,8 @@ class WindowCloseTests(unittest.TestCase):
             return driver
 
         with patch.object(ui, "start_driver", side_effect=launch), \
-                patch.object(ui, "close_orphan_profile_chrome"):
+                patch.object(ui, "close_orphan_profile_chrome"), \
+                patch("builtins.print"):
             worker = threading.Thread(target=ui.DownloaderApp.open_browser, args=(app,))
             worker.start()
             self.assertTrue(returned.wait(1))

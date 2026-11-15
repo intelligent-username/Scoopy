@@ -26,6 +26,9 @@ class CancelUiTests(unittest.TestCase):
         self.app.debug_queue = queue.Queue()
         self.app.setup_ui()
         self.app.after = Mock()
+        self._links_ready_patch = patch.object(ui.os.path, 'getsize', return_value=128)
+        self._links_ready_patch.start()
+        self.addCleanup(self._links_ready_patch.stop)
         self.app.update_buttons()
 
     def test_cancel_waits_for_worker_completion_and_next_event_is_fresh(self):
@@ -36,18 +39,20 @@ class CancelUiTests(unittest.TestCase):
         browser = app.driver
         main_thread = threading.get_ident()
 
-        def download(*args, **options):
+        def download_worker(*args, **options):
             self.assertEqual(threading.get_ident(), main_thread)
             self.assertIs(options["cancel_event"], event)
             ui.check_cancel(options["cancel_event"])
 
         with patch.object(ui.threading, "Thread") as thread, \
                 patch.object(ui, "read_browser_cookies", return_value=cookies), \
-                patch.object(ui, "start_download", side_effect=download), \
+                patch.object(ui, "start_download", side_effect=download_worker), \
                 patch.object(ui.messagebox, "showinfo") as info, \
                 patch.object(ui.messagebox, "showerror") as error:
-            thread.side_effect = lambda **kw: SimpleNamespace(
-                start=lambda: workers.append(kw["target"]))
+            def make_thread(target, *args, **kwargs):
+                return SimpleNamespace(
+                    start=lambda: workers.append(target))
+            thread.side_effect = make_thread
             app.start_operation(
                 lambda event: app.download_videos("offline", cancel_event=event),
                 success, cancellable=True)
@@ -62,6 +67,7 @@ class CancelUiTests(unittest.TestCase):
             with patch.object(ui, "check_cancel", side_effect=[None, ui.OperationCancelled()]):
                 workers.pop()()
             self.assertTrue(app.busy)
+            # Check cookies are cleared by the finally block in download_videos
             self.assertEqual(cookies, [])
             app.check_debug_queue()
             self.assertFalse(app.busy)

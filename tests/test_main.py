@@ -37,7 +37,8 @@ def browser(cookies=None, url='https://www.instagram.com/user/saved/'):
 class BrowserTests(unittest.TestCase):
     def test_start_driver_launches_managed_chrome_with_dedicated_profile(self):
         driver = Mock()
-        with patch.object(browser_module.webdriver, 'Chrome', return_value=driver) as chrome:
+        with patch.object(browser_module.webdriver, 'Chrome', return_value=driver) as chrome, \
+             patch('builtins.print'):
             result = browser_module.start_driver()
         self.assertIs(result, driver)
         options = chrome.call_args.kwargs['options']
@@ -55,20 +56,23 @@ class BrowserTests(unittest.TestCase):
 
         os.environ[browser_module.SE_FORCE_BROWSER_DOWNLOAD] = 'previous'
         try:
-            with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment):
+            with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment), \
+                 patch('builtins.print'):
                 browser_module.start_driver()
         finally:
             restored = os.environ.pop(browser_module.SE_FORCE_BROWSER_DOWNLOAD)
         self.assertEqual(observed_during_call, ['true'])
         self.assertEqual(restored, 'previous')
 
-        with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment):
+        with patch.object(browser_module.webdriver, 'Chrome', side_effect=record_environment), \
+             patch('builtins.print'):
             browser_module.start_driver()
         self.assertNotIn(browser_module.SE_FORCE_BROWSER_DOWNLOAD, os.environ)
 
     def test_start_driver_raises_actionable_error_when_browser_cannot_start(self):
         with patch.object(browser_module.webdriver, 'Chrome',
-                          side_effect=WebDriverException('network down')):
+                          side_effect=WebDriverException('network down')), \
+             patch('builtins.print'):
             with self.assertRaisesRegex(session.AppError, 'managed browser'):
                 browser_module.start_driver()
         self.assertNotIn(browser_module.SE_FORCE_BROWSER_DOWNLOAD, os.environ)
@@ -348,11 +352,15 @@ class DownloadTests(unittest.TestCase):
 class InlineThread:
     """Run workers deterministically; UI events must still wait for queue processing."""
 
-    def __init__(self, target, daemon):
+    def __init__(self, target, daemon=None, args=(), kwargs=None, name=None):
         self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+        self.daemon = daemon
+        self.name = name
 
     def start(self):
-        self.target()
+        self.target(*self.args, **self.kwargs)
 
 
 class AppTests(unittest.TestCase):
@@ -363,10 +371,13 @@ class AppTests(unittest.TestCase):
             download_hint=Mock(), folder_name_var=Mock(), after=Mock(), write_to_debug=Mock(),
             browser_was_open=False, destroy=Mock(),
             closing=threading.Event(), driver_lock=threading.Lock(),
+            winfo_exists=Mock(return_value=True),
         )
         self.app.folder_name_var.get.return_value = 'videos'
         # The links-file gate in update_buttons must not depend on machine state.
         self.enterContext(patch.object(ui.os.path, 'getsize', return_value=128))
+        # Profile encryption must not read the developer profile in tests.
+        self.enterContext(patch.object(ui.profile_crypto, 'is_encrypted_profile', return_value=False))
         for name in ('update_buttons', 'start_operation', 'check_debug_queue',
                      'start_download_thread', 'download_videos', 'start_scraping_thread',
                      'scrape_links', 'on_closing'):

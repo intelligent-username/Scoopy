@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scoopy import browser as browser_module
+from scoopy import session
 
 
 def element(href=None, error=None):
@@ -44,7 +45,8 @@ def fast_collect(driver):
     with patch.object(browser_module, 'SCROLL_PAUSE', 0), \
             patch.object(browser_module, 'FIRST_LINK_POLL', 0), \
             patch.object(browser_module, 'MAX_NO_NEW_ROUNDS', 2), \
-            contextlib.redirect_stdout(io.StringIO()):
+            contextlib.redirect_stdout(io.StringIO()), \
+            patch('builtins.print'):
         return browser_module.collect_reel_links(driver)
 
 
@@ -96,7 +98,8 @@ class CollectReelLinksTests(unittest.TestCase):
             element('/username/'), element('/explore/tags/fun/'),
             element('https://example.com/p/xyz/'),
         ]})
-        self.assertEqual(fast_collect(driver), [])
+        with self.assertRaisesRegex(session.AppError, 'No supported post links were found'):
+            fast_collect(driver)
 
     def test_role_link_fallback_elements_are_checked(self):
         driver = driver_with(
@@ -116,19 +119,27 @@ class CollectReelLinksTests(unittest.TestCase):
             {'a[href]': [element('/p/one/'), element('/p/two/')]},
             {'a[href]': [element('/p/one/'), element('/p/two/')]} # Repeats forever
         )
+        driver.execute_script.return_value = True
         self.assertEqual(fast_collect(driver), [
             'https://www.instagram.com/p/one', 'https://www.instagram.com/p/two'])
-        # One scroll per round plus the final scroll after the cap is reached.
-        self.assertEqual(driver.execute_script.call_count, 3)
+        # Scroll occurs after rounds with new links (1, 2) and after first no-new round (3).
+        # On round 4, no_new_rounds reaches the cap and loop breaks without scrolling.
+        self.assertEqual(driver.execute_script.call_count, 2)
 
-    def test_timeout_before_first_link_returns_empty_without_scrolling(self):
+    def test_no_links_after_timeout_raises_without_saving(self):
         driver = driver_with({'a[href]': []})
         with patch.object(browser_module, 'FIRST_LINK_TIMEOUT', 0.01), \
                 patch.object(browser_module, 'FIRST_LINK_POLL', 0), \
-                contextlib.redirect_stdout(io.StringIO()):
-            result = browser_module.collect_reel_links(driver)
-        self.assertEqual(result, [])
-        driver.execute_script.assert_not_called()
+                patch.object(browser_module, 'MAX_NO_NEW_ROUNDS', 2), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                patch('builtins.print'):
+            with self.assertRaisesRegex(session.AppError, 'No supported post links were found'):
+                browser_module.collect_reel_links(driver)
+        # Empty grids are scrolled in case hydration arrives late, but the
+        # give-up cap bounds that work instead of scrolling forever.
+        self.assertGreater(driver.execute_script.call_count, 0)
+        self.assertLessEqual(driver.execute_script.call_count,
+                             browser_module.MAX_NO_NEW_ROUNDS)
 
     def test_no_secrets_or_cookies_appear_in_output(self):
         driver = driver_with({'a[href]': [element('/reel/one/')]})
