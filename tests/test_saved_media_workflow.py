@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from selenium.common.exceptions import WebDriverException
+
 from scoopy import download, session, ui
 
 
@@ -92,6 +94,58 @@ class SavedNavigationTests(unittest.TestCase):
 
 
 class LoginMonitorTests(unittest.TestCase):
+    def test_disconnect_resets_browser_on_ui_callback(self):
+        driver = object()
+        closing = Mock()
+        closing.wait.return_value = False
+        app = SimpleNamespace(
+            driver=driver, busy=False, closing=closing, driver_lock=threading.Lock(),
+            ui_queue=queue.Queue(), update_buttons=Mock())
+        app._lock_after_disconnect = ui.DownloaderApp._lock_after_disconnect.__get__(app)
+        with patch.object(ui, 'read_browser_cookies', side_effect=WebDriverException()), \
+                patch.object(ui.profile_crypto, 'is_encrypted_profile', return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ui.DownloaderApp.monitor_login(app, driver)
+
+        self.assertIs(app.driver, driver)
+        app.ui_queue.get_nowait()()
+        self.assertIsNone(app.driver)
+        app.update_buttons.assert_called_once()
+
+    def test_disconnect_does_not_clear_replacement_browser(self):
+        driver = object()
+        closing = Mock()
+        closing.wait.return_value = False
+        app = SimpleNamespace(
+            driver=driver, busy=False, closing=closing, driver_lock=threading.Lock(),
+            ui_queue=queue.Queue(), update_buttons=Mock())
+        app._lock_after_disconnect = ui.DownloaderApp._lock_after_disconnect.__get__(app)
+        with patch.object(ui, 'read_browser_cookies', side_effect=WebDriverException()), \
+                patch.object(ui.profile_crypto, 'is_encrypted_profile', return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ui.DownloaderApp.monitor_login(app, driver)
+
+        replacement = object()
+        app.driver = replacement
+        app.ui_queue.get_nowait()()
+        self.assertIs(app.driver, replacement)
+        app.update_buttons.assert_not_called()
+
+    def test_encrypted_profile_cleanup_finishes_before_reset(self):
+        from scoopy import browser_cleanup
+
+        app = SimpleNamespace()
+        on_done = Mock()
+        with patch.object(ui.profile_crypto, 'is_encrypted_profile', return_value=True), \
+                patch.object(ui.profile_crypto, 'current_session_key', return_value=object()), \
+                patch.object(browser_cleanup, 'start_cleanup') as start_cleanup, \
+                patch.object(ui, 'shutdown_driver', return_value=True), \
+                patch.object(ui.profile_crypto, 'lock_session_profile', return_value=True):
+            ui.DownloaderApp._lock_after_disconnect(app, object(), on_done)
+            on_done.assert_not_called()
+            start_cleanup.call_args.args[0]()
+            on_done.assert_called_once()
+
     def test_saved_navigation_runs_once_despite_repeated_session_checks(self):
         for first_logged_in in (True, False):
             with self.subTest(first_logged_in=first_logged_in):

@@ -847,7 +847,15 @@ class DownloaderApp(tk.Tk):
                 logged_in = False
             except WebDriverException:
                 print("⚠️ Could not check Instagram login: the browser disconnected.")
-                self._lock_after_disconnect(driver)
+                def reset_browser():
+                    with self.driver_lock:
+                        if self.driver is not driver:
+                            return
+                        self.driver = None
+                    self.update_buttons()
+
+                self._lock_after_disconnect(
+                    driver, lambda: self.ui_queue.put(reset_browser))
                 return
             except Exception as error:
                 print(f"⚠️ Could not check Instagram login ({type(error).__name__}).")
@@ -865,11 +873,15 @@ class DownloaderApp(tk.Tk):
                     navigate_to_saved(driver)
             first_check = False
 
-    def _lock_after_disconnect(self, driver):
+    def _lock_after_disconnect(self, driver, on_done=None):
         """Lock the profile only after confirming our browser is gone."""
         if not profile_crypto.is_encrypted_profile(ENCRYPTED_PROFILE_DIR):
+            if on_done is not None:
+                on_done()
             return
         if profile_crypto.current_session_key() is None:
+            if on_done is not None:
+                on_done()
             return
         from .browser_cleanup import start_cleanup
 
@@ -885,6 +897,8 @@ class DownloaderApp(tk.Tk):
                     CHROME_PROFILE_DIR, ENCRYPTED_PROFILE_DIR,
                     PROFILE_UNLOCK_MARKER):
                 print("🔐 Browser profile encrypted after the browser closed.")
+            if on_done is not None:
+                on_done()
 
         try:
             start_cleanup(cleanup, timeout=profile_crypto.LOCK_TIMEOUT_SECONDS)
@@ -1176,6 +1190,12 @@ class DownloaderApp(tk.Tk):
                     completion = self.ui_queue.get_nowait()
                 except queue.Empty:
                     break
+                if callable(completion):
+                    try:
+                        completion()
+                    except Exception:
+                        report_completion_failure()
+                    continue
                 self.busy = False
                 self.operation_event = None
                 try:
