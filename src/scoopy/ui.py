@@ -86,6 +86,30 @@ class DownloaderApp(tk.Tk):
         self.check_debug_queue()
         self.check_recovery_folder()
 
+    def _show_scoopy_stats(self, event=None):
+        name = self.folder_name_var.get().strip()
+        directory = os.path.join(BASE_DIR, name, "completed_videos")
+        count = 0
+        size = 0
+        try:
+            if name:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if entry.name.lower().endswith(".mp4") and entry.is_file(follow_symlinks=False):
+                            count += 1
+                            size += entry.stat(follow_symlinks=False).st_size
+        except FileNotFoundError:
+            pass
+        except OSError:
+            messagebox.showerror("Scoopy stats", "Could not read the selected video folder.")
+            return "break"
+        messagebox.showinfo(
+            "Scoopy stats",
+            f"Scoopy stats: {count} videos, {size / 1_000_000_000:.2f} GB, "
+            f"{count / 60:.2f} hours saved\n\n"
+            "Estimated at one minute saved per video.")
+        return "break"
+
     def setup_ui(self):
         """Initializes and lays out all UI components."""
         self.title(APP_TITLE)
@@ -96,6 +120,7 @@ class DownloaderApp(tk.Tk):
         # but never below the layout's intended proportions.
         self.minsize(WINDOW_WIDTH, 720)
         self._apply_window_icon()
+        self.bind("<Control-Shift-KeyPress-S>", self._show_scoopy_stats)
 
         main_frame = ttk.Frame(self, padding=24)
         main_frame.pack(fill=tk.BOTH, expand=True)
